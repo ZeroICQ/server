@@ -1044,6 +1044,7 @@ public:
   {
     char buff[MAX_FIELD_WIDTH];
     String val(buff, sizeof(buff), &my_charset_bin);
+    uint32 length= 0;
 
     for (uint i= COLUMN_STAT_MIN_VALUE; i <= COLUMN_STAT_HISTOGRAM; i++)
     {  
@@ -1060,7 +1061,9 @@ public:
           else
           {
             table_field->collected_stats->min_value->val_str(&val);
-            stat_field->store(val.ptr(), val.length(), &my_charset_bin);
+            length= Well_formed_prefix(val.charset(), val.ptr(),
+                           MY_MIN(val.length(), stat_field->field_length)).length();
+            stat_field->store(val.ptr(), length, &my_charset_bin);
           }
           break;
         case COLUMN_STAT_MAX_VALUE:
@@ -1069,7 +1072,9 @@ public:
           else
           {
             table_field->collected_stats->max_value->val_str(&val);
-            stat_field->store(val.ptr(), val.length(), &my_charset_bin);
+            length= Well_formed_prefix(val.charset(), val.ptr(),
+                            MY_MIN(val.length(), stat_field->field_length)).length();
+            stat_field->store(val.ptr(), length, &my_charset_bin);
           }
           break;
         case COLUMN_STAT_NULLS_RATIO:
@@ -2935,6 +2940,25 @@ int update_statistics_for_table(THD *thd, TABLE *table)
 }
 
 
+void set_min_max_fields_table(Field* field, TABLE *table)
+{
+  if (field->read_stats->min_value)
+    field->read_stats->min_value->table= table;
+  if (field->read_stats->max_value)
+    field->read_stats->max_value->table= table;
+}
+
+void check_stat_tables_owner(THD *thd, TABLE_LIST *table_list)
+{
+  for ( ; table_list ; table_list= table_list->next_global)
+  {
+    DBUG_ASSERT(thd->mdl_context.is_lock_owner(MDL_key::TABLE,
+                                               table_list->db,
+                                               table_list->table_name,
+                                               MDL_SHARED_READ));
+  }
+}
+
 /**
   @brief
   Read statistics for a table from the persistent statistical tables
@@ -2978,8 +3002,10 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
   KEY *key_info, *key_info_end;
   TABLE_SHARE *table_share= table->s;
   Table_statistics *read_stats= table_share->stats_cb.table_stats;
+  TABLE_LIST *table_list= stat_tables;
 
   DBUG_ENTER("read_statistics_for_table");
+  check_stat_tables_owner(thd, stat_tables);
 
   /* Read statistics from the statistical table table_stats */
   stat_table= stat_tables[TABLE_STAT].table;
@@ -2994,6 +3020,7 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
   for (field_ptr= table_share->field; *field_ptr; field_ptr++)
   {
     table_field= *field_ptr;
+    set_min_max_fields_table(table_field, table);
     column_stat.set_key_fields(table_field);
     column_stat.get_stat_values();
     total_hist_size+= table_field->read_stats->histogram.get_size();
@@ -3059,6 +3086,9 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
       }
     }
   }
+
+  for (field_ptr= table_share->field; *field_ptr; field_ptr++)
+    set_min_max_fields_table(table_field, NULL);
       
   table->stats_is_read= TRUE;
 

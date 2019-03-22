@@ -113,6 +113,8 @@ double get_column_range_cardinality(Field *field,
                                     uint range_flag);
 bool is_stat_table(const char *db, const char *table);
 bool is_eits_usable(Field* field);
+void set_min_max_fields_table(Field* field);
+void check_stat_tables_owner(THD *thd, TABLE_LIST *table_list);
 
 class Histogram
 {

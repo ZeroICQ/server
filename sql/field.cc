@@ -2219,7 +2219,6 @@ bool Field_str::can_be_substituted_to_equal_item(const Context &ctx,
   return false;
 }
 
-
 void Field_num::make_field(Send_field *field)
 {
   Field::make_field(field);
@@ -4332,7 +4331,7 @@ longlong Field_long::val_int(void)
   ASSERT_COLUMN_MARKED_FOR_READ;
   int32 j;
   /* See the comment in Field_long::store(long long) */
-  DBUG_ASSERT(!table || table->in_use == current_thd);
+  DBUG_ASSERT(table->in_use == current_thd);
   j=sint4korr(ptr);
   return unsigned_flag ? (longlong) (uint32) j : (longlong) j;
 }
@@ -7087,7 +7086,7 @@ int Field_string::store(const char *from,uint length,CHARSET_INFO *cs)
   String_copier copier;
 
   /* See the comment for Field_long::store(long long) */
-  DBUG_ASSERT(!table || table->in_use == current_thd);
+  DBUG_ASSERT(table->in_use == current_thd);
 
   copy_length= copier.well_formed_copy(field_charset,
                                        (char*) ptr, field_length,
@@ -7273,7 +7272,7 @@ String *Field_string::val_str(String *val_buffer __attribute__((unused)),
 {
   ASSERT_COLUMN_MARKED_FOR_READ;
   /* See the comment for Field_long::store(long long) */
-  DBUG_ASSERT(!table || table->in_use == current_thd);
+  DBUG_ASSERT(table->in_use == current_thd);
   uint length;
   if (get_thd()->variables.sql_mode &
       MODE_PAD_CHAR_TO_FULL_LENGTH)
