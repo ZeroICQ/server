@@ -5673,16 +5673,12 @@ Item *and_new_conditions_to_optimized_cond(THD *thd, Item *cond,
       It checks if after the merge the multiple equalities are knowingly
       true or false equalities.
       It attaches to cond the conditions from new_conds list and the result
-      of the merge of multiple equalities. The multiple equalities are
-      attached only to the upper level of AND-condition cond. So they
-      should be pushed down to the inner levels of cond AND-condition
-      if needed. It is done by propagate_new_equalities().
+      of the merge of multiple equalities.
     */
     COND_EQUAL *cond_equal= &((Item_cond_and *) cond)->m_cond_equal;
     List<Item_equal> *cond_equalities= &cond_equal->current_level;
     List<Item> *and_args= ((Item_cond_and *)cond)->argument_list();
     and_args->disjoin((List<Item> *) cond_equalities);
-    and_args->append(&new_conds);
 
     while ((equality= it++))
     {
@@ -5692,22 +5688,40 @@ Item *and_new_conditions_to_optimized_cond(THD *thd, Item *cond,
     List_iterator_fast<Item_equal> ei(*cond_equalities);
     while ((equality= ei++))
     {
-      if (equality->const_item() && !equality->val_int())
-        is_simplified_cond= true;
-      equality->fixed= 0;
+      equality->unfix_fields();
       if (equality->fix_fields(thd, NULL))
         return NULL;
     }
 
+    li.rewind();
+    while ((item=li++))
+    {
+      /**
+        If and_new_conditions_to_optimized_cond() is called for
+        HAVING pushdown optimization there can be some equalities
+        on inner levels of new_conds elements that are still not
+        transformed into the multiple equalities.
+        To transform them build_equal_items() is called.
+      */
+      if (thd->having_pushdown &&
+          item->type() == Item::COND_ITEM &&
+          ((Item_cond *)item)->functype() == Item_func::COND_OR_FUNC)
+      {
+        COND_EQUAL *cond_eq_or= 0;
+        item= item->build_equal_items(thd,
+                                      &((Item_cond_and *) cond)->m_cond_equal,
+                                      MY_TEST(OPT_LINK_EQUAL_FIELDS),
+                                      &cond_eq_or);
+        item->unfix_fields();
+        if (item->fix_fields(thd, NULL))
+          return NULL;
+      }
+      if (item->const_item() && !item->val_int())
+        is_simplified_cond= true;
+      and_args->push_back(item, thd->mem_root);
+    }
     and_args->append((List<Item> *) cond_equalities);
     *cond_eq= &((Item_cond_and *) cond)->m_cond_equal;
-
-    propagate_new_equalities(thd, cond, cond_equalities,
-                             cond_equal->upper_levels,
-                             &is_simplified_cond);
-    cond= cond->propagate_equal_fields(thd,
-                                       Item::Context_boolean(),
-                                       cond_equal);
   }
   else
   {
@@ -5737,67 +5751,104 @@ Item *and_new_conditions_to_optimized_cond(THD *thd, Item *cond,
         new_conds_list.push_back(cond, thd->mem_root))
       return NULL;
 
-    if (new_conds.elements > 0)
-    {
-      li.rewind();
-      while ((item=li++))
-      {
-        if (!item->is_fixed() && item->fix_fields(thd, NULL))
-          return NULL;
-        if (item->const_item() && !item->val_int())
-          is_simplified_cond= true;
-      }
-      new_conds_list.append(&new_conds);
-    }
-
     if (is_mult_eq)
     {
       Item_equal *eq_cond= (Item_equal *)cond;
       eq_cond->upper_levels= 0;
       eq_cond->merge_into_list(thd, &new_cond_equal.current_level,
                                false, false);
+    }
 
-      while ((equality= it++))
-      {
-        if (equality->const_item() && !equality->val_int())
-          is_simplified_cond= true;
-      }
+    List_iterator_fast<Item_equal> ei(new_cond_equal.current_level);
+    while ((equality=ei++))
+    {
+      equality->unfix_fields();
+      if (equality->fix_fields(thd, NULL))
+        return NULL;
+    }
 
-      if (new_cond_equal.current_level.elements +
-          new_conds_list.elements == 1)
+    Item_cond_and *and_cond= 0;
+    COND_EQUAL *inherited= 0;
+    if (new_conds_list.elements +
+        new_conds.elements +
+        new_cond_equal.current_level.elements > 1)
+    {
+      and_cond= new (thd->mem_root) Item_cond_and(thd);
+      and_cond->m_cond_equal.copy(new_cond_equal);
+      inherited= &and_cond->m_cond_equal;
+    }
+
+    li.rewind();
+    while ((item=li++))
+    {
+      /**
+        If and_new_conditions_to_optimized_cond() is called for
+        HAVING pushdown optimization there can be some equalities
+        on inner levels of new_conds elements that are still not
+        transformed into the multiple equalities.
+        To transform them build_equal_items() is called.
+      */
+      if (thd->having_pushdown &&
+          item->type() == Item::COND_ITEM &&
+          ((Item_cond *)item)->functype() == Item_func::COND_OR_FUNC)
       {
-        it.rewind();
-        equality= it++;
-        equality->fixed= 0;
-        if (equality->fix_fields(thd, NULL))
+        COND_EQUAL *cond_eq_or= 0;
+        item= item->build_equal_items(thd,
+                                      inherited,
+                                      MY_TEST(OPT_LINK_EQUAL_FIELDS),
+                                      &cond_eq_or);
+        item->unfix_fields();
+        if (item->fix_fields(thd, NULL))
           return NULL;
       }
-      (*cond_eq)->copy(new_cond_equal);
+      if (item->const_item() && !item->val_int())
+        is_simplified_cond= true;
+      new_conds_list.push_back(item, thd->mem_root);
     }
     new_conds_list.append((List<Item> *)&new_cond_equal.current_level);
 
-    if (new_conds_list.elements > 1)
+    if (and_cond)
     {
-      Item_cond_and *and_cond=
-        new (thd->mem_root) Item_cond_and(thd, new_conds_list);
-
-      and_cond->m_cond_equal.copy(new_cond_equal);
+      and_cond->argument_list()->append(&new_conds_list);
       cond= (Item *)and_cond;
-      *cond_eq= &((Item_cond_and *)cond)->m_cond_equal;
+      *cond_eq= &((Item_cond_and *) cond)->m_cond_equal;
     }
     else
     {
       List_iterator_fast<Item> iter(new_conds_list);
       cond= iter++;
+      if (cond->type() == Item::FUNC_ITEM &&
+          ((Item_func *)cond)->functype() == Item_func::MULT_EQUAL_FUNC)
+      {
+        if (!(*cond_eq))
+          *cond_eq= new COND_EQUAL();
+        (*cond_eq)->copy(new_cond_equal);
+      }
+      else
+        *cond_eq= 0;
     }
+  }
 
-    if (!cond->is_fixed() && cond->fix_fields(thd, NULL))
-      return NULL;
+  if (!cond)
+    return NULL;
 
-    if (new_cond_equal.current_level.elements > 0)
-      cond= cond->propagate_equal_fields(thd,
-                                         Item::Context_boolean(),
-                                         &new_cond_equal);
+  if (cond->fix_fields_if_needed(thd, NULL))
+    return NULL;
+
+  if (*cond_eq)
+  {
+    /**
+      The multiple equalities are attached only to the upper level
+      of AND-condition cond. So they hould be pushed down to the
+      inner levels of cond AND-condition if needed.
+    */
+    propagate_new_equalities(thd, cond,
+                             &(*cond_eq)->current_level,
+                             0,
+                             &is_simplified_cond);
+    cond= cond->propagate_equal_fields(thd,
+                                       Item::Context_boolean(),
+                                       *cond_eq);
   }
 
   /*
@@ -5805,7 +5856,7 @@ Item *and_new_conditions_to_optimized_cond(THD *thd, Item *cond,
     true or false equalities the method calls removes_eq_cond() to remove them
     from cond and set the cond_value to the appropriate value.
   */
-  if (is_simplified_cond)
+  if (cond && is_simplified_cond)
     cond= cond->remove_eq_conds(thd, cond_value, true);
 
   return cond;

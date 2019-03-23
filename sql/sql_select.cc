@@ -1949,10 +1949,9 @@ JOIN::optimize_inner()
       conds= and_new_conditions_to_optimized_cond(thd, conds, &cond_equal,
                                                   select_lex->attach_to_conds,
                                                   &cond_value, true);
-      if (conds && !conds->is_fixed() && conds->fix_fields(thd, &conds))
-        DBUG_RETURN(1);
       sel->attach_to_conds.empty();
     }
+    thd->having_pushdown= false;
   }
   
   if (optimizer_flag(thd, OPTIMIZER_SWITCH_COND_PUSHDOWN_FOR_SUBQUERY))

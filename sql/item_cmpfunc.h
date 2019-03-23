@@ -3207,6 +3207,7 @@ public:
   uint elements_count() { return equal_items.elements; }
   friend class Item_equal_fields_iterator;
   bool count_sargable_conds(void *arg);
+  Item *multiple_equality_transformer(THD *thd, uchar *arg);
   friend class Item_equal_iterator<List_iterator_fast,Item>;
   friend class Item_equal_iterator<List_iterator,Item>;
   friend Item *eliminate_item_equal(THD *thd, COND *cond,

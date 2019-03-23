@@ -7378,31 +7378,37 @@ Item_equal::excl_dep_on_group_fields_for_having_pushdown(st_select_lex *sel)
 
 /**
   @brief
-    Create from this multiple equality equalities that can be pushed down
+    Transform multiple equality into the list of equalities
 
   @param thd         the thread handle
-  @param equalities  the result list of created equalities
+  @param equalities  the list where created equalities are stored
   @param checker     the checker callback function to be applied to the nodes
-                     of the tree of the object
+                     of the tree of the object to check if multiple equality
+                     elements can be used to create equalities
   @param arg         parameter to be passed to the checker
 
   @details
-    The method traverses this multiple equality trying to create from it
-    new equalities that can be pushed down. It creates equalities with
-    the constant used in this multiple equality if it exists or the first
-    item for which checker returns non-NULL result and all other items
-    in this multiple equality for which checker returns non-NULL result.
+    The method transforms multiple equality into the list of equalities in
+    such way:
+    it goes through the elements of the multiple equality and checks with
+    checker if this elements can be used in equality creation.
+    If the element can be used the method creates equality using this
+    element and:
 
-    Example:
+    1. Constant, if there is a constant defined in this multiple equality.
 
     MULT_EQ(1,a,b)
     =>
     Created equalities: {(1=a),(1=b)}
 
+    or 2. The first element in this multiple equality that is passed
+    by checker.
+
     MULT_EQ(a,b,c,d)
     =>
     Created equalities: {(a=b),(a=c),(a=d)}
 
+    All created equalities are collected into the equalities list.
 
   @retval true   if an error occurs
   @retval false  otherwise
@@ -7449,4 +7455,37 @@ bool Item_equal::create_pushable_equalities(THD *thd,
       return true;
   }
   return false;
+}
+
+
+/**
+  Transform multiple equality into the AND condition of equalities.
+
+  MULT_EQ(1,a,b)
+  =>
+  (a = 1) AND (b = 1)
+
+  Equalities are built in Item_equal::create_pushable_equalities() method
+  using elements of this multiple equality.
+*/
+
+Item *Item_equal::multiple_equality_transformer(THD *thd, uchar *arg)
+{
+  List<Item> equalities;
+  Pushdown_checker checker=
+    &Item::pushable_equality_checker_for_having_pushdown;
+  if (create_pushable_equalities(thd, &equalities, checker, (uchar *)this))
+    return 0;
+
+  switch (equalities.elements)
+  {
+  case 0:
+    return 0;
+  case 1:
+    return equalities.head();
+    break;
+  default:
+    return new (thd->mem_root) Item_cond_and(thd, equalities);
+    break;
+  }
 }
