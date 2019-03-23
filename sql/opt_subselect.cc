@@ -5608,8 +5608,6 @@ int select_value_catcher::send_data(List<Item> &items)
   @param cond_eq           IN/OUT the multiple equalities of cond
   @param new_conds         IN/OUT the list of conditions needed to add
   @param cond_value        the returned value of the condition
-  @param build_cond_equal  flag to control if COND_EQUAL elements for
-                           AND-conditions should be built
 
   @details
     The method creates new condition through conjunction of cond and
@@ -5625,8 +5623,7 @@ int select_value_catcher::send_data(List<Item> &items)
 Item *and_new_conditions_to_optimized_cond(THD *thd, Item *cond,
                                            COND_EQUAL **cond_eq,
                                            List<Item> &new_conds,
-                                           Item::cond_result *cond_value,
-                                           bool build_cond_equal)
+                                           Item::cond_result *cond_value)
 {
   COND_EQUAL new_cond_equal;
   Item *item;
@@ -5703,7 +5700,7 @@ Item *and_new_conditions_to_optimized_cond(THD *thd, Item *cond,
         transformed into the multiple equalities.
         To transform them build_equal_items() is called.
       */
-      if (thd->having_pushdown &&
+      if (thd->having_processing &&
           item->type() == Item::COND_ITEM &&
           ((Item_cond *)item)->functype() == Item_func::COND_OR_FUNC)
       {
@@ -5788,7 +5785,7 @@ Item *and_new_conditions_to_optimized_cond(THD *thd, Item *cond,
         transformed into the multiple equalities.
         To transform them build_equal_items() is called.
       */
-      if (thd->having_pushdown &&
+      if (thd->having_processing &&
           item->type() == Item::COND_ITEM &&
           ((Item_cond *)item)->functype() == Item_func::COND_OR_FUNC)
       {
@@ -6940,10 +6937,14 @@ bool Item_in_subselect::pushdown_cond_for_in_subquery(THD *thd, Item *cond)
     remaining_cond->transform(thd,
                               &Item::in_subq_field_transformer_for_having,
                               (uchar *)this);
-  if (!remaining_cond)
+  if (!remaining_cond ||
+      remaining_cond->walk(&Item::cleanup_excluding_const_fields_processor,
+                           0, 0))
     goto exit;
 
-  sel->mark_or_conds_to_avoid_pushdown(remaining_cond);
+  mark_or_conds_to_avoid_pushdown(remaining_cond);
+
+  sel->cond_pushed_into_having= remaining_cond;
 
 exit:
   thd->lex->current_select= save_curr_select;

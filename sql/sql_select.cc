@@ -1942,16 +1942,17 @@ JOIN::optimize_inner()
       optimizer_flag(thd, OPTIMIZER_SWITCH_COND_PUSHDOWN_FROM_HAVING) &&
       cond_value != Item::COND_FALSE)
   {
+    thd->having_processing= true;
     having=
       select_lex->pushdown_from_having_into_where(thd, having);
     if (select_lex->attach_to_conds.elements != 0)
     {
       conds= and_new_conditions_to_optimized_cond(thd, conds, &cond_equal,
                                                   select_lex->attach_to_conds,
-                                                  &cond_value, true);
+                                                  &cond_value);
       sel->attach_to_conds.empty();
     }
-    thd->having_pushdown= false;
+    thd->having_processing= false;
   }
   
   if (optimizer_flag(thd, OPTIMIZER_SWITCH_COND_PUSHDOWN_FOR_SUBQUERY))
@@ -1972,46 +1973,11 @@ JOIN::optimize_inner()
   if (eq_list.elements != 0)
   {
     conds= and_new_conditions_to_optimized_cond(thd, conds, &cond_equal,
-                                                eq_list, &cond_value, false);
+                                                eq_list, &cond_value);
 
     if (!conds &&
         cond_value != Item::COND_FALSE && cond_value != Item::COND_TRUE)
       DBUG_RETURN(TRUE);
-  }
-
-  {
-    if (select_lex->where)
-    {
-      select_lex->cond_value= cond_value;
-      if (sel->where != conds && cond_value == Item::COND_OK)
-        thd->change_item_tree(&sel->where, conds);
-    }
-    if (select_lex->having)
-    {
-      select_lex->having_value= having_value;
-      if (sel->having != having && having_value == Item::COND_OK)
-        thd->change_item_tree(&sel->having, having);
-    }
-    if (cond_value == Item::COND_FALSE || having_value == Item::COND_FALSE ||
-        (!unit->select_limit_cnt && !(select_options & OPTION_FOUND_ROWS)))
-    {                                          /* Impossible cond */
-      if (unit->select_limit_cnt)
-      {
-        DBUG_PRINT("info", (having_value == Item::COND_FALSE ?
-                              "Impossible HAVING" : "Impossible WHERE"));
-        zero_result_cause=  having_value == Item::COND_FALSE ?
-                             "Impossible HAVING" : "Impossible WHERE";
-      }
-      else
-      {
-        DBUG_PRINT("info", ("Zero limit"));
-        zero_result_cause= "Zero limit";
-      }
-      table_count= top_join_tab_count= 0;
-      error= 0;
-      subq_exit_fl= true;
-      goto setup_subq_exit;
-    }
   }
 
   if (optimizer_flag(thd, OPTIMIZER_SWITCH_COND_PUSHDOWN_FOR_DERIVED))
@@ -2050,6 +2016,40 @@ JOIN::optimize_inner()
     /* Run optimize phase for all derived tables/views used in this SELECT. */
     if (select_lex->handle_derived(thd->lex, DT_OPTIMIZE))
       DBUG_RETURN(1);
+  }
+  {
+    if (select_lex->where)
+    {
+      select_lex->cond_value= cond_value;
+      if (sel->where != conds && cond_value == Item::COND_OK)
+        thd->change_item_tree(&sel->where, conds);
+    }
+    if (select_lex->having)
+    {
+      select_lex->having_value= having_value;
+      if (sel->having != having && having_value == Item::COND_OK)
+        thd->change_item_tree(&sel->having, having);
+    }
+    if (cond_value == Item::COND_FALSE || having_value == Item::COND_FALSE ||
+        (!unit->select_limit_cnt && !(select_options & OPTION_FOUND_ROWS)))
+    {                                          /* Impossible cond */
+      if (unit->select_limit_cnt)
+      {
+        DBUG_PRINT("info", (having_value == Item::COND_FALSE ?
+                              "Impossible HAVING" : "Impossible WHERE"));
+        zero_result_cause=  having_value == Item::COND_FALSE ?
+                             "Impossible HAVING" : "Impossible WHERE";
+      }
+      else
+      {
+        DBUG_PRINT("info", ("Zero limit"));
+        zero_result_cause= "Zero limit";
+      }
+      table_count= top_join_tab_count= 0;
+      error= 0;
+      subq_exit_fl= true;
+      goto setup_subq_exit;
+    }
   }
 
 #ifdef WITH_PARTITION_STORAGE_ENGINE
@@ -2329,8 +2329,10 @@ int JOIN::optimize_stage2()
   }
   if (having)
   {
+    thd->having_processing= true;
     having= substitute_for_best_equal_field(thd, NO_PARTICULAR_TAB, having,
                                             having_equal, map2table, false);
+    thd->having_processing= false;
     if (thd->is_error())
     {
       error= 1;
@@ -15304,8 +15306,16 @@ Item *eliminate_item_equal(THD *thd, COND *cond, COND_EQUAL *upper_levels,
       */
       Item *head_item= (!item_const && current_sjm && 
                         current_sjm_head != field_item) ? current_sjm_head: head;
+      if (!thd->having_processing)
+      {
+        Item *head_real_item=  head_item->real_item();
+        if (head_real_item->type() == Item::FIELD_ITEM)
+          head_item= head_real_item;
 
-      eq_item= new (thd->mem_root) Item_func_eq(thd, field_item, head_item);
+        eq_item= new (thd->mem_root) Item_func_eq(thd, field_item->real_item(), head_item);
+      }
+      else
+        eq_item= new (thd->mem_root) Item_func_eq(thd, field_item, head_item);
 
       if (!eq_item || eq_item->set_cmp_func())
         return 0;

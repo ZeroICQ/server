@@ -921,6 +921,42 @@ WHERE (t1.a > 1) AND (t1.a < 4) AND (t1.a > 0)
 GROUP BY t1.a;
 eval $no_pushdown explain format=json $query;
 
+--echo # AND formula : equality in WHERE
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+eval $no_pushdown $query;
+eval $query;
+eval explain $query;
+eval explain format=json $query;
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.a < 4) AND (t1.a > 0)
+GROUP BY t1.a;
+eval $no_pushdown explain format=json $query;
+
+--echo # AND formula : equality in WHERE
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+eval $no_pushdown $query;
+eval $query;
+eval explain $query;
+eval explain format=json $query;
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.a < 4) AND (t1.a > 0)
+GROUP BY t1.a;
+eval $no_pushdown explain format=json $query;
+
 --echo # OR formula : inequality in WHERE
 let $query=
 SELECT t1.a,MAX(t1.b),t1.c
@@ -991,6 +1027,78 @@ let $query=
 SELECT t1.a,MAX(t1.b),t1.c
 FROM t1
 WHERE ((t1.a > 1) AND (t1.c < 3)) AND
+      ((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+eval $no_pushdown explain format=json $query;
+
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+eval $no_pushdown $query;
+eval $query;
+eval explain $query;
+eval explain format=json $query;
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c < 3)) AND
+      ((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+eval $no_pushdown explain format=json $query;
+
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+eval $no_pushdown $query;
+eval $query;
+eval explain $query;
+eval explain format=json $query;
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c = 3)) AND
+      ((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+eval $no_pushdown explain format=json $query;
+
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+eval $no_pushdown $query;
+eval $query;
+eval explain $query;
+eval explain format=json $query;
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c < 3)) AND
+      ((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+eval $no_pushdown explain format=json $query;
+
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+eval $no_pushdown $query;
+eval $query;
+eval explain $query;
+eval explain format=json $query;
+let $query=
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c = 3)) AND
       ((t1.a < 4) AND (t1.c > 1))
 GROUP BY t1.a,t1.c;
 eval $no_pushdown explain format=json $query;

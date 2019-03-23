@@ -1596,7 +1596,7 @@ EXPLAIN
           "access_type": "ALL",
           "rows": 5,
           "filtered": 100,
-          "attached_condition": "t1.a > 1 and t1.c = t1.a or t1.a < 3"
+          "attached_condition": "t1.c = t1.a and t1.a > 1 or t1.a < 3"
         }
       }
     }
@@ -3446,6 +3446,122 @@ EXPLAIN
     }
   }
 }
+# AND formula : equality in WHERE
+set statement optimizer_switch='condition_pushdown_from_having=off' for SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+a	MAX(t1.b)	c
+1	22	3
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+a	MAX(t1.b)	c
+1	22	3
+explain SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	5	Using where
+explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "1 and 1",
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1"
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.a < 4) AND (t1.a > 0)
+GROUP BY t1.a;
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1"
+    }
+  }
+}
+# AND formula : equality in WHERE
+set statement optimizer_switch='condition_pushdown_from_having=off' for SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+a	MAX(t1.b)	c
+1	22	3
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+a	MAX(t1.b)	c
+1	22	3
+explain SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	5	Using where
+explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1)
+GROUP BY t1.a
+HAVING (t1.a < 4) AND (t1.a > 0);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "1 and 1",
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1"
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.a < 4) AND (t1.a > 0)
+GROUP BY t1.a;
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1"
+    }
+  }
+}
 # OR formula : inequality in WHERE
 set statement optimizer_switch='condition_pushdown_from_having=off' for SELECT t1.a,MAX(t1.b),t1.c
 FROM t1
@@ -3712,6 +3828,254 @@ EXPLAIN
           "attached_condition": "t1.a > 1 and t1.c < 3 and t1.a < 4 and t1.c > 1"
         }
       }
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+explain SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	5	Using where; Using temporary; Using filesort
+explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "1",
+    "filesort": {
+      "sort_key": "t1.c",
+      "temporary_table": {
+        "table": {
+          "table_name": "t1",
+          "access_type": "ALL",
+          "rows": 5,
+          "filtered": 100,
+          "attached_condition": "t1.a = 1 and t1.c < 3 and t1.c > 1"
+        }
+      }
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c < 3)) AND
+((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "filesort": {
+      "sort_key": "t1.c",
+      "temporary_table": {
+        "table": {
+          "table_name": "t1",
+          "access_type": "ALL",
+          "rows": 5,
+          "filtered": 100,
+          "attached_condition": "t1.a = 1 and t1.c < 3 and t1.c > 1"
+        }
+      }
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+1	14	3
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+1	14	3
+explain SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	5	Using where
+explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "1 and 1",
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1 and t1.c = 3"
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c = 3)) AND
+((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1 and t1.c = 3"
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+explain SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	5	Using where; Using temporary; Using filesort
+explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c < 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "1",
+    "filesort": {
+      "sort_key": "t1.c",
+      "temporary_table": {
+        "table": {
+          "table_name": "t1",
+          "access_type": "ALL",
+          "rows": 5,
+          "filtered": 100,
+          "attached_condition": "t1.a = 1 and t1.c < 3 and t1.c > 1"
+        }
+      }
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c < 3)) AND
+((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "filesort": {
+      "sort_key": "t1.c",
+      "temporary_table": {
+        "table": {
+          "table_name": "t1",
+          "access_type": "ALL",
+          "rows": 5,
+          "filtered": 100,
+          "attached_condition": "t1.a = 1 and t1.c < 3 and t1.c > 1"
+        }
+      }
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+1	14	3
+SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+a	MAX(t1.b)	c
+1	14	3
+explain SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	5	Using where
+explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE (t1.a = 1) AND (t1.c = 3)
+GROUP BY t1.a,t1.c
+HAVING (t1.a < 4) AND (t1.c > 1);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "const_condition": "1 and 1",
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1 and t1.c = 3"
+    }
+  }
+}
+set statement optimizer_switch='condition_pushdown_from_having=off' for explain format=json SELECT t1.a,MAX(t1.b),t1.c
+FROM t1
+WHERE ((t1.a = 1) AND (t1.c = 3)) AND
+((t1.a < 4) AND (t1.c > 1))
+GROUP BY t1.a,t1.c;
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "table_name": "t1",
+      "access_type": "ALL",
+      "rows": 5,
+      "filtered": 100,
+      "attached_condition": "t1.a = 1 and t1.c = 3"
     }
   }
 }

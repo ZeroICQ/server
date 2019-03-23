@@ -5033,7 +5033,7 @@ public:
   Item *sp_prepare_func_item(Item **it_addr, uint cols= 1);
   bool sp_eval_expr(Field *result_field, Item **expr_item_ptr);
 
-  bool having_pushdown;
+  bool having_processing;
 };
 
 /** A short cut for thd->get_stmt_da()->set_ok_status(). */
