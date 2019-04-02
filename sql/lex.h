@@ -773,6 +773,7 @@ static SYMBOL sql_functions[] = {
   { "SUBSTR",		SYM(SUBSTRING)},
   { "SUBSTRING",	SYM(SUBSTRING)},
   { "SUM",		SYM(SUM_SYM)},
+  { "SUM2",		SYM(SUM_SYM2)},
   { "SYSDATE",		SYM(SYSDATE)},
   { "SYSTEM_USER",      SYM(USER_SYM)},
   { "TRIM",		SYM(TRIM)},

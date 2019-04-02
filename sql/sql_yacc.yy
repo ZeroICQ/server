@@ -1088,6 +1088,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %token  STRAIGHT_JOIN
 %token  SUBSTRING                     /* SQL-2003-N */
 %token  SUM_SYM                       /* SQL-2003-N */
+%token  SUM_SYM2
 %token  SYSDATE
 %token  TABLE_REF_PRIORITY
 %token  TABLE_SYM                     /* SQL-2003-R */
@@ -11305,6 +11306,12 @@ sum_expr:
         | SUM_SYM '(' in_sum_expr ')'
           {
             $$= new (thd->mem_root) Item_sum_sum(thd, $3, FALSE);
+            if (unlikely($$ == NULL))
+              MYSQL_YYABORT;
+          }
+        | SUM_SYM2 '(' in_sum_expr ')'
+          {
+            $$= new (thd->mem_root) Item_sum_sum2(thd, $3);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }

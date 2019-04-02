@@ -34,6 +34,8 @@
 #include "sp.h"
 #include "sql_parse.h"
 #include "sp_head.h"
+#include "item_sum.h"
+
 
 /**
   Calculate the affordable RAM limit for structures like TREE or Unique
@@ -4142,4 +4144,13 @@ Item_func_group_concat::~Item_func_group_concat()
 {
   if (!original && unique_filter)
     delete unique_filter;    
+}
+
+Item_sum_sum2::Item_sum_sum2(THD *thd, Item *item_par) : Item_sum_sum(thd, item_par, false) {
+
+}
+
+double Item_sum_sum2::val_real()
+{
+    return 2*sum;
 }

@@ -1,0 +1,16 @@
+DROP TABLE IF EXISTS tbl_a;
+Warnings:
+Note	1051	Unknown table 'test.tbl_a'
+DROP TABLE IF EXISTS tbl_b;
+Warnings:
+Note	1051	Unknown table 'test.tbl_b'
+CREATE TABLE tbl_a (
+value int NOT NULL,
+PRIMARY KEY(value)
+);
+insert into tbl_a values (1);
+insert into tbl_a values (2);
+insert into tbl_a values (3),(4),(5),(6),(7),(8),(9),(10);
+select sum2(a.value) from tbl_a a;
+sum2(a.value)
+55

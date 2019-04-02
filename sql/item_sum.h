@@ -774,6 +774,7 @@ protected:
   bool fix_length_and_dec();
 
 public:
+
   Item_sum_sum(THD *thd, Item *item_par, bool distinct):
     Item_sum_num(thd, item_par), direct_added(FALSE),
     direct_reseted_field(FALSE)
@@ -818,6 +819,14 @@ public:
 private:
   void add_helper(bool perform_removal);
   ulonglong count;
+};
+
+
+class Item_sum_sum2 : public Item_sum_sum
+{
+public:
+    Item_sum_sum2(THD *thd, Item *item_par);
+    double val_real();
 };
 
 

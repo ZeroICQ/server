@@ -39,6 +39,7 @@ class Item_copy;
 class Item_func_or_sum;
 class Item_sum_hybrid;
 class Item_sum_sum;
+class Item_sum_sum2;
 class Item_sum_avg;
 class Item_sum_variance;
 class Item_func_hex;
@@ -6140,6 +6141,7 @@ public:
   are always in sync to each other for hybrid functions.
 */
 class Type_handler_hybrid_field_type
+
 {
   const Type_handler *m_type_handler;
   bool aggregate_for_min_max(const Type_handler *other);
