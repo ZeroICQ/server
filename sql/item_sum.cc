@@ -4150,7 +4150,12 @@ Item_sum_sum2::Item_sum_sum2(THD *thd, Item *item_par) : Item_sum_sum(thd, item_
 
 }
 
-double Item_sum_sum2::val_real()
+void Item_sum_sum2::update_field()
 {
-    return 2*sum;
+    Item_sum_sum::update_field();
+    my_decimal field_value(result_field);
+    my_decimal two;
+    two.intg = 2;
+    my_decimal_mul(E_DEC_FATAL_ERROR, dec_buffs, &two, &field_value);
+    result_field->store_decimal(dec_buffs);
 }

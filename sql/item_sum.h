@@ -826,7 +826,7 @@ class Item_sum_sum2 : public Item_sum_sum
 {
 public:
     Item_sum_sum2(THD *thd, Item *item_par);
-    double val_real();
+    void update_field() override;
 };
 
 

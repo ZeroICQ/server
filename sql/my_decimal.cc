@@ -21,6 +21,8 @@
 #ifndef MYSQL_CLIENT
 #include "sql_class.h"                          // THD
 #include "field.h"
+#include "../libmariadb/include/mysqld_error.h"
+
 #endif
 
 #define DIG_BASE     1000000000
