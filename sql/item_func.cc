@@ -404,6 +404,25 @@ Item_func::eval_not_null_tables(void *opt_arg)
 }
 
 
+bool
+Item_func::find_not_null_fields(table_map allowed)
+{
+  if (~allowed & used_tables())
+    return false;
+
+  Item **arg,**arg_end;
+  if (arg_count)
+  {
+    for (arg=args, arg_end=args+arg_count; arg != arg_end ; arg++)
+    {
+      if (!(*arg)->find_not_null_fields(allowed))
+        continue;
+    }
+  }
+  return false;
+}
+
+
 void Item_func::fix_after_pullout(st_select_lex *new_parent, Item **ref,
                                   bool merge)
 {
@@ -559,6 +578,15 @@ void Item_args::propagate_equal_fields(THD *thd,
   for (i= 0; i < arg_count; i++)
     args[i]->propagate_equal_fields_and_change_item_tree(thd, ctx, cond,
                                                          &args[i]);
+}
+
+
+Sql_mode_dependency Item_args::value_depends_on_sql_mode_bit_or() const
+{
+  Sql_mode_dependency res;
+  for (uint i= 0; i < arg_count; i++)
+    res|= args[i]->value_depends_on_sql_mode();
+  return res;
 }
 
 
@@ -1207,7 +1235,19 @@ bool Item_func_minus::fix_length_and_dec()
   if (Item_func_minus::type_handler()->Item_func_minus_fix_length_and_dec(this))
     DBUG_RETURN(TRUE);
   DBUG_PRINT("info", ("Type: %s", type_handler()->name().ptr()));
+  if ((m_depends_on_sql_mode_no_unsigned_subtraction= unsigned_flag) &&
+      (current_thd->variables.sql_mode & MODE_NO_UNSIGNED_SUBTRACTION))
+    unsigned_flag= false;
   DBUG_RETURN(FALSE);
+}
+
+
+Sql_mode_dependency Item_func_minus::value_depends_on_sql_mode() const
+{
+  Sql_mode_dependency dep= Item_func_additive_op::value_depends_on_sql_mode();
+  if (m_depends_on_sql_mode_no_unsigned_subtraction)
+    dep|= Sql_mode_dependency(0, MODE_NO_UNSIGNED_SUBTRACTION);
+  return dep;
 }
 
 
@@ -1683,8 +1723,11 @@ my_decimal *Item_func_mod::decimal_op(my_decimal *decimal_value)
 
 void Item_func_mod::result_precision()
 {
+  unsigned_flag= args[0]->unsigned_flag;
   decimals= MY_MAX(args[0]->decimal_scale(), args[1]->decimal_scale());
-  max_length= MY_MAX(args[0]->max_length, args[1]->max_length);
+  uint prec= MY_MAX(args[0]->decimal_precision(), args[1]->decimal_precision());
+  fix_char_length(my_decimal_precision_to_length_no_truncation(prec, decimals,
+                                                               unsigned_flag));
 }
 
 
@@ -2331,6 +2374,42 @@ void Item_func_round::fix_arg_double()
 }
 
 
+void Item_func_round::fix_arg_temporal(const Type_handler *h,
+                                       uint int_part_length)
+{
+  set_handler(h);
+  if (args[1]->const_item() && !args[1]->is_expensive())
+  {
+    Longlong_hybrid_null dec= args[1]->to_longlong_hybrid_null();
+    fix_attributes_temporal(int_part_length,
+                            dec.is_null() ? args[0]->decimals :
+                            dec.to_uint(TIME_SECOND_PART_DIGITS));
+  }
+  else
+    fix_attributes_temporal(int_part_length, args[0]->decimals);
+}
+
+
+void Item_func_round::fix_arg_time()
+{
+  fix_arg_temporal(&type_handler_time2, MIN_TIME_WIDTH);
+}
+
+
+void Item_func_round::fix_arg_datetime()
+{
+  /*
+    Day increment operations are not supported for '0000-00-00',
+    see get_date_from_daynr() for details. Therefore, expressions like
+      ROUND('0000-00-00 23:59:59.999999')
+    return NULL.
+  */
+  if (!truncate)
+    maybe_null= true;
+  fix_arg_temporal(&type_handler_datetime2, MAX_DATETIME_WIDTH);
+}
+
+
 void Item_func_round::fix_arg_int()
 {
   if (args[1]->const_item())
@@ -2467,6 +2546,36 @@ my_decimal *Item_func_round::decimal_op(my_decimal *decimal_value)
                                     truncate ? TRUNCATE : HALF_UP) > 1)))
     return decimal_value;
   return 0;
+}
+
+
+bool Item_func_round::time_op(THD *thd, MYSQL_TIME *to)
+{
+  DBUG_ASSERT(args[0]->type_handler()->mysql_timestamp_type() ==
+              MYSQL_TIMESTAMP_TIME);
+  Time::Options opt(Time::default_flags_for_get_date(),
+                    truncate ? TIME_FRAC_TRUNCATE : TIME_FRAC_ROUND,
+                    Time::DATETIME_TO_TIME_DISALLOW);
+  Longlong_hybrid_null dec= args[1]->to_longlong_hybrid_null();
+  Time *tm= new (to) Time(thd, args[0], opt,
+                          dec.to_uint(TIME_SECOND_PART_DIGITS));
+  null_value= !tm->is_valid_time() || dec.is_null();
+  DBUG_ASSERT(maybe_null || !null_value);
+  return null_value;
+}
+
+
+bool Item_func_round::date_op(THD *thd, MYSQL_TIME *to, date_mode_t fuzzydate)
+{
+  DBUG_ASSERT(args[0]->type_handler()->mysql_timestamp_type() ==
+              MYSQL_TIMESTAMP_DATETIME);
+  Datetime::Options opt(thd, truncate ? TIME_FRAC_TRUNCATE : TIME_FRAC_ROUND);
+  Longlong_hybrid_null dec= args[1]->to_longlong_hybrid_null();
+  Datetime *tm= new (to) Datetime(thd, args[0], opt,
+                                  dec.to_uint(TIME_SECOND_PART_DIGITS));
+  null_value= !tm->is_valid_datetime() || dec.is_null();
+  DBUG_ASSERT(maybe_null || !null_value);
+  return null_value;
 }
 
 
@@ -4565,6 +4674,10 @@ update_hash(user_var_entry *entry, bool set_null, void *ptr, size_t length,
     entry->unsigned_flag= unsigned_arg;
   }
   entry->type=type;
+#ifndef EMBEDDED_LIBRARY
+  THD *thd= current_thd;
+  thd->session_tracker.user_variables.mark_as_changed(thd, entry);
+#endif
   return 0;
 }
 
@@ -4654,7 +4767,7 @@ longlong user_var_entry::val_int(bool *null_value) const
 /** Get the value of a variable as a string. */
 
 String *user_var_entry::val_str(bool *null_value, String *str,
-				uint decimals)
+                                uint decimals) const
 {
   if ((*null_value= (value == 0)))
     return (String*) 0;

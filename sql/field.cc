@@ -64,7 +64,7 @@ inline bool Field::marked_for_read() const
          (!table->read_set ||
           bitmap_is_set(table->read_set, field_index) ||
           (!(ptr >= table->record[0] &&
-          ptr < table->record[0] + table->s->reclength)));
+             ptr < table->record[0] + table->s->reclength)));
 }
 
 /*
@@ -75,7 +75,7 @@ inline bool Field::marked_for_read() const
 
 inline bool Field::marked_for_write_or_computed() const
 {
-  return (is_stat_field || !table ||
+  return (!table ||
           (!table->write_set ||
            bitmap_is_set(table->write_set, field_index) ||
            (!(ptr >= table->record[0] &&
@@ -1382,6 +1382,48 @@ error:
 }
 
 
+void Field::error_generated_column_function_is_not_allowed(THD *thd,
+                                                           bool error) const
+{
+  StringBuffer<64> tmp;
+  vcol_info->expr->print(&tmp, (enum_query_type)
+                               (QT_TO_SYSTEM_CHARSET |
+                                QT_ITEM_IDENT_SKIP_DB_NAMES |
+                                QT_ITEM_IDENT_SKIP_TABLE_NAMES));
+  my_error(ER_GENERATED_COLUMN_FUNCTION_IS_NOT_ALLOWED,
+           MYF(error ? 0 : ME_WARNING),
+           tmp.c_ptr(), vcol_info->get_vcol_type_name(),
+           const_cast<const char*>(field_name.str));
+}
+
+
+/*
+  Check if an indexed or a persistent virtual column depends on sql_mode flags
+  that it cannot handle.
+  See sql_mode.h for details.
+*/
+bool Field::check_vcol_sql_mode_dependency(THD *thd, vcol_init_mode mode) const
+{
+  DBUG_ASSERT(vcol_info);
+  if ((flags & PART_KEY_FLAG) != 0 || stored_in_db())
+  {
+    Sql_mode_dependency valdep= vcol_info->expr->value_depends_on_sql_mode();
+    sql_mode_t cnvdep= conversion_depends_on_sql_mode(thd, vcol_info->expr);
+    Sql_mode_dependency dep=
+        (valdep | Sql_mode_dependency(0, cnvdep)) &
+        Sql_mode_dependency(~0, ~can_handle_sql_mode_dependency_on_store());
+    if (dep)
+    {
+      bool error= (mode & VCOL_INIT_DEPENDENCY_FAILURE_IS_ERROR) != 0;
+      error_generated_column_function_is_not_allowed(thd, error);
+      dep.push_dependency_warnings(thd);
+      return error;
+    }
+  }
+  return false;
+}
+
+
 bool Field::make_empty_rec_store_default_value(THD *thd, Item *item)
 {
   DBUG_ASSERT(!(flags & BLOB_FLAG));
@@ -1423,6 +1465,12 @@ void Field_num::prepend_zeros(String *value) const
       value->length(field_length);
     }
   }
+}
+
+
+sql_mode_t Field_num::can_handle_sql_mode_dependency_on_store() const
+{
+  return MODE_PAD_CHAR_TO_FULL_LENGTH;
 }
 
 
@@ -1738,8 +1786,7 @@ Field::Field(uchar *ptr_arg,uint32 length_arg,uchar *null_ptr_arg,
   flags=null_ptr ? 0: NOT_NULL_FLAG;
   comment.str= (char*) "";
   comment.length=0;
-  field_index= 0;   
-  is_stat_field= FALSE;
+  field_index= 0;
   cond_selectivity= 1.0;
   next_equal_field= NULL;
 }
@@ -2391,30 +2438,18 @@ Field *Field::clone(MEM_ROOT *root, TABLE *new_table)
 }
 
 
-
-Field *Field::clone(MEM_ROOT *root, TABLE *new_table, my_ptrdiff_t diff,
-                    bool stat_flag)
+Field *Field::clone(MEM_ROOT *root, TABLE *new_table, my_ptrdiff_t diff)
 {
   Field *tmp;
   if ((tmp= (Field*) memdup_root(root,(char*) this,size_of())))
   {
-    tmp->init(new_table);
-    tmp->move_field_offset(diff);
-  }
-  tmp->is_stat_field= stat_flag;
-  return tmp;
-}
-
-
-Field *Field::clone(MEM_ROOT *root, my_ptrdiff_t diff)
-{
-  Field *tmp;
-  if ((tmp= (Field*) memdup_root(root,(char*) this,size_of())))
-  {
+    if (new_table)
+      tmp->init(new_table);
     tmp->move_field_offset(diff);
   }
   return tmp;
 }
+
 
 int Field::set_default()
 {
@@ -2848,7 +2883,7 @@ int Field_decimal::store(const char *from_arg, size_t len, CHARSET_INFO *cs)
   
   /*
     Write digits of the frac_% parts ;
-    Depending on get_thd()->count_cutted_fields, we may also want
+    Depending on get_thd()->count_cuted_fields, we may also want
     to know if some non-zero tail of these parts will
     be truncated (for example, 0.002->0.00 will generate a warning,
     while 0.000->0.00 will not)
@@ -3447,11 +3482,12 @@ void Field_new_decimal::sql_type(String &str) const
 
    @returns number of bytes written to metadata_ptr
 */
-int Field_new_decimal::save_field_metadata(uchar *metadata_ptr)
+
+Binlog_type_info Field_new_decimal::binlog_type_info() const
 {
-  *metadata_ptr= precision;
-  *(metadata_ptr + 1)= decimals();
-  return 2;
+  DBUG_ASSERT(Field_new_decimal::type() == binlog_type());
+  return Binlog_type_info(Field_new_decimal::type(), precision +
+                          (decimals() << 8), 2, binlog_signedness());
 }
 
 
@@ -4619,10 +4655,11 @@ bool Field_float::send_binary(Protocol *protocol)
 
    @returns number of bytes written to metadata_ptr
 */
-int Field_float::save_field_metadata(uchar *metadata_ptr)
+Binlog_type_info Field_float::binlog_type_info() const
 {
-  *metadata_ptr= pack_length();
-  return 1;
+  DBUG_ASSERT(Field_float::type() == binlog_type());
+  return Binlog_type_info(Field_float::type(), pack_length(), 1,
+                          binlog_signedness());
 }
 
 
@@ -4930,10 +4967,11 @@ void Field_double::sort_string(uchar *to,uint length __attribute__((unused)))
 
    @returns number of bytes written to metadata_ptr
 */
-int Field_double::save_field_metadata(uchar *metadata_ptr)
+Binlog_type_info Field_double::binlog_type_info() const
 {
-  *metadata_ptr= pack_length();
-  return 1;
+  DBUG_ASSERT(Field_double::type() == binlog_type());
+  return Binlog_type_info(Field_double::type(), pack_length(), 1,
+                          binlog_signedness());
 }
 
 
@@ -5011,6 +5049,14 @@ Field_timestamp::Field_timestamp(uchar *ptr_arg, uint32 len_arg,
     if (unireg_check != TIMESTAMP_DN_FIELD)
       flags|= ON_UPDATE_NOW_FLAG;
   }
+}
+
+
+sql_mode_t
+Field_timestamp::conversion_depends_on_sql_mode(THD *thd, Item *expr) const
+{
+  return expr->datetime_precision(thd) > decimals() ?
+         MODE_TIME_ROUND_FRACTIONAL : 0;
 }
 
 
@@ -5581,8 +5627,19 @@ bool Field_timestampf::val_native(Native *to)
   return Field::val_native(to);
 }
 
+Binlog_type_info Field_timestampf::binlog_type_info() const
+{
+  return Binlog_type_info(Field_timestampf::binlog_type(), decimals(), 1);
+}
+
 
 /*************************************************************/
+sql_mode_t Field_temporal::can_handle_sql_mode_dependency_on_store() const
+{
+  return MODE_PAD_CHAR_TO_FULL_LENGTH;
+}
+
+
 bool Field_temporal::is_equal(const Column_definition &new_field) const
 {
   return new_field.type_handler() == type_handler() &&
@@ -5769,6 +5826,14 @@ Item *Field_temporal::get_equal_const_item_datetime(THD *thd,
 ** In number context: HHMMSS
 ** Stored as a 3 byte unsigned int
 ****************************************************************************/
+sql_mode_t
+Field_time::conversion_depends_on_sql_mode(THD *thd, Item *expr) const
+{
+  return expr->time_precision(thd) > decimals() ?
+         MODE_TIME_ROUND_FRACTIONAL : 0;
+}
+
+
 int Field_time::store_TIME_with_warning(const Time *t,
                                         const ErrConv *str, int warn)
 {
@@ -6191,6 +6256,10 @@ bool Field_timef::get_date(MYSQL_TIME *ltime, date_mode_t fuzzydate)
   longlong tmp= my_time_packed_from_binary(ptr, dec);
   TIME_from_longlong_time_packed(ltime, tmp);
   return false;
+}
+Binlog_type_info Field_timef::binlog_type_info() const
+{
+  return Binlog_type_info(Field_timef::binlog_type(), decimals(), 1);
 }
 
 /****************************************************************************
@@ -6673,6 +6742,15 @@ void Field_datetime::store_TIME(const MYSQL_TIME *ltime)
   int8store(ptr,tmp);
 }
 
+
+sql_mode_t
+Field_datetime::conversion_depends_on_sql_mode(THD *thd, Item *expr) const
+{
+  return expr->datetime_precision(thd) > decimals() ?
+         MODE_TIME_ROUND_FRACTIONAL : 0;
+}
+
+
 bool Field_datetime::send_binary(Protocol *protocol)
 {
   MYSQL_TIME tm;
@@ -6903,6 +6981,10 @@ bool Field_datetimef::get_TIME(MYSQL_TIME *ltime, const uchar *pos,
   TIME_from_longlong_datetime_packed(ltime, tmp);
   return validate_MMDD(tmp, ltime->month, ltime->day, fuzzydate);
 }
+Binlog_type_info Field_datetimef::binlog_type_info() const
+{
+  return Binlog_type_info(Field_datetimef::binlog_type(), decimals(), 1);
+}
 
 /****************************************************************************
 ** string type
@@ -6945,7 +7027,8 @@ Field_longstr::check_string_copy_error(const String_copier *copier,
   if (likely(!(pos= copier->most_important_error_pos())))
     return FALSE;
 
-  if (!is_stat_field)
+  /* Ignore errors from internal expressions */
+  if (get_thd()->count_cuted_fields > CHECK_FIELD_EXPRESSION)
   {
     DBUG_ASSERT(sizeof(tmp) >= convert_to_printable_required_length(6));
     convert_to_printable(tmp, sizeof(tmp), pos, (end - pos), cs, 6);
@@ -6979,8 +7062,9 @@ int
 Field_longstr::report_if_important_data(const char *pstr, const char *end,
                                         bool count_spaces)
 {
-  THD *thd= get_thd();
-  if ((pstr < end) && thd->count_cuted_fields > CHECK_FIELD_EXPRESSION)
+  THD *thd;
+  if ((pstr < end) &&
+      (thd= get_thd())->count_cuted_fields > CHECK_FIELD_EXPRESSION)
   {
     if (test_if_important_data(field_charset(), pstr, end))
     {
@@ -6991,7 +7075,8 @@ Field_longstr::report_if_important_data(const char *pstr, const char *end,
       return 2;
     }
     else if (count_spaces)
-    { /* If we lost only spaces then produce a NOTE, not a WARNING */
+    {
+      /* If we lost only spaces then produce a NOTE, not a WARNING */
       set_note(WARN_DATA_TRUNCATED, 1);
       return 2;
     }
@@ -7189,6 +7274,18 @@ longlong Field_string::val_int(void)
 }
 
 
+sql_mode_t Field_string::value_depends_on_sql_mode() const
+{
+  return has_charset() ? MODE_PAD_CHAR_TO_FULL_LENGTH : sql_mode_t(0);
+};
+
+
+sql_mode_t Field_string::can_handle_sql_mode_dependency_on_store() const
+{
+  return has_charset() ? MODE_PAD_CHAR_TO_FULL_LENGTH : sql_mode_t(0);
+}
+
+
 String *Field_string::val_str(String *val_buffer __attribute__((unused)),
 			      String *val_ptr)
 {
@@ -7314,6 +7411,28 @@ void Field_string::sql_type(String &res) const
     res.append(STRING_WITH_LEN(" binary"));
 }
 
+/**
+   For fields which are associated with character sets their length is provided
+   in octets and their character set information is also provided as part of
+   type information.
+
+   @param   res       String which contains filed type and length.
+*/
+void Field_string::sql_rpl_type(String *res) const
+{
+  CHARSET_INFO *cs=charset();
+  if (Field_string::has_charset())
+  {
+    size_t length= cs->cset->snprintf(cs, (char*) res->ptr(),
+                                      res->alloced_length(),
+                                      "char(%u octets) character set %s",
+                                      field_length,
+                                      charset()->csname);
+    res->length(length);
+  }
+  else
+    Field_string::sql_type(*res);
+ }
 
 uchar *Field_string::pack(uchar *to, const uchar *from, uint max_length)
 {
@@ -7450,15 +7569,16 @@ Field_string::unpack(uchar *to, const uchar *from, const uchar *from_end,
 
    @returns number of bytes written to metadata_ptr
 */
-int Field_string::save_field_metadata(uchar *metadata_ptr)
+Binlog_type_info Field_string::binlog_type_info() const
 {
+  uint16 a;
   DBUG_ASSERT(field_length < 1024);
   DBUG_ASSERT((real_type() & 0xF0) == 0xF0);
   DBUG_PRINT("debug", ("field_length: %u, real_type: %u",
-                       field_length, real_type()));
-  *metadata_ptr= (real_type() ^ ((field_length & 0x300) >> 4));
-  *(metadata_ptr + 1)= field_length & 0xFF;
-  return 2;
+                     field_length, real_type()));
+  a= (real_type() ^ ((field_length & 0x300) >> 4)) + (((uint)(field_length & 0xFF)) << 8);
+  DBUG_ASSERT(Field_string::type() == binlog_type());
+  return Binlog_type_info(Field_string::type(), a, 2, charset());
 }
 
 
@@ -7547,11 +7667,10 @@ const uint Field_varstring::MAX_SIZE= UINT_MAX16;
 
    @returns number of bytes written to metadata_ptr
 */
-int Field_varstring::save_field_metadata(uchar *metadata_ptr)
+Binlog_type_info Field_varstring::binlog_type_info() const
 {
-  DBUG_ASSERT(field_length <= 65535);
-  int2store((char*)metadata_ptr, field_length);
-  return 2;
+  DBUG_ASSERT(Field_varstring::type() == binlog_type());
+  return Binlog_type_info(Field_varstring::type(), field_length, 2, charset());
 }
 
 
@@ -7752,6 +7871,29 @@ void Field_varstring::sql_type(String &res) const
   if ((thd->variables.sql_mode & (MODE_MYSQL323 | MODE_MYSQL40)) &&
       has_charset() && (charset()->state & MY_CS_BINSORT))
     res.append(STRING_WITH_LEN(" binary"));
+}
+
+/**
+   For fields which are associated with character sets their length is provided
+   in octets and their character set information is also provided as part of
+   type information.
+
+   @param   res       String which contains filed type and length.
+*/
+void Field_varstring::sql_rpl_type(String *res) const
+{
+  CHARSET_INFO *cs=charset();
+  if (Field_varstring::has_charset())
+  {
+    size_t length= cs->cset->snprintf(cs, (char*) res->ptr(),
+                                      res->alloced_length(),
+                                      "varchar(%u octets) character set %s",
+                                      field_length,
+                                      charset()->csname);
+    res->length(length);
+  }
+  else
+    Field_varstring::sql_type(*res);
 }
 
 
@@ -8161,6 +8303,11 @@ int Field_varstring_compressed::cmp_max(const uchar *a_ptr, const uchar *b_ptr,
 
   return sortcmp(&a, &b, field_charset());
 }
+Binlog_type_info Field_varstring_compressed::binlog_type_info() const
+{
+  return Binlog_type_info(Field_varstring_compressed::binlog_type(),
+                          field_length, 2, charset());
+}
 
 
 /****************************************************************************
@@ -8505,12 +8652,11 @@ Field *Field_blob::new_key_field(MEM_ROOT *root, TABLE *new_table,
 
    @returns number of bytes written to metadata_ptr
 */
-int Field_blob::save_field_metadata(uchar *metadata_ptr)
+Binlog_type_info Field_blob::binlog_type_info() const
 {
-  DBUG_ENTER("Field_blob::save_field_metadata");
-  *metadata_ptr= pack_length_no_ptr();
-  DBUG_PRINT("debug", ("metadata: %u (pack_length_no_ptr)", *metadata_ptr));
-  DBUG_RETURN(1);
+  DBUG_ASSERT(Field_blob::type() == binlog_type());
+  return Binlog_type_info(Field_blob::type(), pack_length_no_ptr(), 1,
+                          charset());
 }
 
 
@@ -8765,12 +8911,23 @@ longlong Field_blob_compressed::val_int(void)
                                       buf.ptr(), buf.length()).result();
 }
 
+Binlog_type_info Field_blob_compressed::binlog_type_info() const
+{
+  return Binlog_type_info(Field_blob_compressed::binlog_type(),
+                          pack_length_no_ptr(), 1, charset());
+}
 
 /****************************************************************************
 ** enum type.
 ** This is a string which only can have a selection of different values.
 ** If one uses this string in a number context one gets the type number.
 ****************************************************************************/
+
+sql_mode_t Field_enum::can_handle_sql_mode_dependency_on_store() const
+{
+  return MODE_PAD_CHAR_TO_FULL_LENGTH;
+}
+
 
 enum ha_base_keytype Field_enum::key_type() const
 {
@@ -8893,11 +9050,11 @@ longlong Field_enum::val_int(const uchar *real_ptr) const
 
    @returns number of bytes written to metadata_ptr
 */
-int Field_enum::save_field_metadata(uchar *metadata_ptr)
+Binlog_type_info Field_enum::binlog_type_info() const
 {
-  *metadata_ptr= real_type();
-  *(metadata_ptr + 1)= pack_length();
-  return 2;
+  DBUG_ASSERT(Field_enum::type() == binlog_type());
+  return Binlog_type_info(Field_enum::type(), real_type() + (pack_length() << 8),
+                          2, charset(), (TYPELIB *)get_typelib(), NULL);
 }
 
 
@@ -9098,6 +9255,13 @@ void Field_set::sql_type(String &res) const
     flag= 1;
   }
   res.append(')');
+}
+
+Binlog_type_info Field_set::binlog_type_info() const
+{
+  DBUG_ASSERT(Field_set::type() == binlog_type());
+  return Binlog_type_info(Field_set::type(), real_type()
+           + (pack_length() << 8), 2, charset(), NULL, (TYPELIB *)get_typelib());
 }
 
 /**
@@ -9628,33 +9792,6 @@ uint Field_bit::get_key_image(uchar *buff, uint length, imagetype type_arg)
 
 
 /**
-   Save the field metadata for bit fields.
-
-   Saves the bit length in the first byte and bytes in record in the
-   second byte of the field metadata array at index of *metadata_ptr and
-   *(metadata_ptr + 1).
-
-   @param   metadata_ptr   First byte of field metadata
-
-   @returns number of bytes written to metadata_ptr
-*/
-int Field_bit::save_field_metadata(uchar *metadata_ptr)
-{
-  DBUG_ENTER("Field_bit::save_field_metadata");
-  DBUG_PRINT("debug", ("bit_len: %d, bytes_in_rec: %d",
-                       bit_len, bytes_in_rec));
-  /*
-    Since this class and Field_bit_as_char have different ideas of
-    what should be stored here, we compute the values of the metadata
-    explicitly using the field_length.
-   */
-  metadata_ptr[0]= field_length % 8;
-  metadata_ptr[1]= field_length / 8;
-  DBUG_RETURN(2);
-}
-
-
-/**
    Returns the number of bytes field uses in row-based replication 
    row packed size.
 
@@ -10068,13 +10205,11 @@ void Column_definition::create_length_to_internal_length_bit()
 {
   if (f_bit_as_char(pack_flag))
   {
-    key_length= pack_length= ((length + 7) & ~7) / 8;
+    pack_length= ((length + 7) & ~7) / 8;
   }
   else
   {
     pack_length= (uint) length / 8;
-    /* We need one extra byte to store the bits we save among the null bits */
-    key_length= pack_length + MY_TEST(length & 7);
   }
 }
 
@@ -10083,7 +10218,7 @@ void Column_definition::create_length_to_internal_length_newdecimal()
 {
   DBUG_ASSERT(length < UINT_MAX32);
   uint prec= get_decimal_precision((uint)length, decimals, flags & UNSIGNED_FLAG);
-  key_length= pack_length= my_decimal_get_binary_size(prec, decimals);
+  pack_length= my_decimal_get_binary_size(prec, decimals);
 }
 
 
@@ -10435,7 +10570,6 @@ Column_definition::Column_definition(THD *thd, Field *old_field,
   field_name= old_field->field_name;
   flags=      old_field->flags;
   pack_length=old_field->pack_length();
-  key_length= old_field->key_length();
   set_handler(old_field->type_handler());
   comment=    old_field->comment;
   decimals=   old_field->decimals();
@@ -10520,7 +10654,6 @@ Column_definition::redefine_stage1_common(const Column_definition *dup_field,
                                       schema->default_table_charset;
   length=       dup_field->char_length;
   pack_length=  dup_field->pack_length;
-  key_length=   dup_field->key_length;
   decimals=     dup_field->decimals;
   unireg_check= dup_field->unireg_check;
   flags=        dup_field->flags;
@@ -10791,13 +10924,17 @@ void Field::set_warning_truncated_wrong_value(const char *type_arg,
                                               const char *value)
 {
   THD *thd= get_thd();
-  const char *db_name= table->s->db.str;
-  const char *table_name= table->s->table_name.str;
+  const char *db_name;
+  const char *table_name;
+  /*
+    table has in the past been 0 in case of wrong calls when processing
+    statistics tables. Let's protect against that.
+  */
+  DBUG_ASSERT(table);
 
-  if (!db_name)
-    db_name= "";
-  if (!table_name)
-    table_name= "";
+  db_name= (table && table->s->db.str) ? table->s->db.str : "";
+  table_name= (table && table->s->table_name.str) ?
+              table->s->table_name.str : "";
 
   push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
                       ER_TRUNCATED_WRONG_VALUE_FOR_FIELD,
@@ -10829,33 +10966,6 @@ key_map Field::get_possible_keys()
   DBUG_ASSERT(table->pos_in_table_list);
   return (table->pos_in_table_list->is_materialized_derived() ?
           part_of_key : key_start);
-}
-
-
-/**
-  Mark the field as having an explicit default value.
-
-  @param value  if available, the value that the field is being set to
-
-  @note
-    Fields that have an explicit default value should not be updated
-    automatically via the DEFAULT or ON UPDATE functions. The functions
-    that deal with data change functionality (INSERT/UPDATE/LOAD),
-    determine if there is an explicit value for each field before performing
-    the data change, and call this method to mark the field.
-
-    If the 'value' parameter is NULL, then the field is marked unconditionally
-    as having an explicit value. If 'value' is not NULL, then it can be further
-    analyzed to check if it really should count as a value.
-*/
-
-bool Field::set_explicit_default(Item *value)
-{
-  if (value->type() == Item::DEFAULT_VALUE_ITEM &&
-      !((Item_default_value*)value)->arg)
-    return false;
-  set_has_explicit_value();
-  return true;
 }
 
 

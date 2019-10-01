@@ -210,6 +210,7 @@ public:
   void traverse_cond(Cond_traverser traverser,
                      void * arg, traverse_order order);
   bool eval_not_null_tables(void *opt_arg);
+  bool find_not_null_fields(table_map allowed);
  // bool is_expensive_processor(void *arg);
  // virtual bool is_expensive() { return 0; }
   inline void raise_numeric_overflow(const char *type_name)
@@ -873,6 +874,7 @@ public:
   Item_func_case_expression(THD *thd, List<Item> &list):
     Item_func_hybrid_field_type(thd, list)
   { }
+  bool find_not_null_fields(table_map allowed) { return false; }
 };
 
 
@@ -1340,11 +1342,15 @@ public:
 
 class Item_func_minus :public Item_func_additive_op
 {
+  bool m_depends_on_sql_mode_no_unsigned_subtraction;
 public:
   Item_func_minus(THD *thd, Item *a, Item *b):
-    Item_func_additive_op(thd, a, b) {}
+    Item_func_additive_op(thd, a, b),
+    m_depends_on_sql_mode_no_unsigned_subtraction(false)
+  { }
   const char *func_name() const { return "-"; }
   enum precedence precedence() const { return ADD_PRECEDENCE; }
+  Sql_mode_dependency value_depends_on_sql_mode() const;
   longlong int_op();
   double real_op();
   my_decimal *decimal_op(my_decimal *);
@@ -1450,14 +1456,13 @@ public:
   }
   void fix_length_and_dec_decimal()
   {
-    Item_num_op::fix_length_and_dec_decimal();
-    unsigned_flag= args[0]->unsigned_flag;
+    result_precision();
+    fix_decimals();
   }
   void fix_length_and_dec_int()
   {
-    max_length= MY_MAX(args[0]->max_length, args[1]->max_length);
-    decimals= 0;
-    unsigned_flag= args[0]->unsigned_flag;
+    result_precision();
+    DBUG_ASSERT(decimals == 0);
     set_handler(type_handler_long_or_longlong());
   }
   bool check_partition_func_processor(void *int_arg) {return FALSE;}
@@ -1713,21 +1718,36 @@ public:
 
 /* This handles round and truncate */
 
-class Item_func_round :public Item_func_numhybrid
+class Item_func_round :public Item_func_hybrid_field_type
 {
   bool truncate;
   void fix_length_and_dec_decimal(uint decimals_to_set);
   void fix_length_and_dec_double(uint decimals_to_set);
 public:
   Item_func_round(THD *thd, Item *a, Item *b, bool trunc_arg)
-    :Item_func_numhybrid(thd, a, b), truncate(trunc_arg) {}
+    :Item_func_hybrid_field_type(thd, a, b), truncate(trunc_arg) {}
   const char *func_name() const { return truncate ? "truncate" : "round"; }
   double real_op();
   longlong int_op();
   my_decimal *decimal_op(my_decimal *);
+  bool date_op(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate);
+  bool time_op(THD *thd, MYSQL_TIME *ltime);
+  bool native_op(THD *thd, Native *to)
+  {
+    DBUG_ASSERT(0);
+    return true;
+  }
+  String *str_op(String *str)
+  {
+    DBUG_ASSERT(0);
+    return NULL;
+  }
   void fix_arg_decimal();
   void fix_arg_int();
   void fix_arg_double();
+  void fix_arg_time();
+  void fix_arg_datetime();
+  void fix_arg_temporal(const Type_handler *h, uint int_part_length);
   bool fix_length_and_dec()
   {
     return args[0]->type_handler()->Item_func_round_fix_length_and_dec(this);
@@ -2007,6 +2027,10 @@ public:
   bool eval_not_null_tables(void *)
   {
     not_null_tables_cache= 0;
+    return false;
+  }
+  bool find_not_null_fields(table_map allowed)
+  {
     return false;
   }
   Item* propagate_equal_fields(THD *thd, const Context &ctx, COND_EQUAL *cond)
@@ -2380,6 +2404,10 @@ public:
   {
     not_null_tables_cache= 0;
     return 0;
+  }
+  bool find_not_null_fields(table_map allowed)
+  {
+    return false;
   }
   bool is_expensive() { return 1; }
   virtual void print(String *str, enum_query_type query_type);
@@ -3000,6 +3028,10 @@ public:
     not_null_tables_cache= 0;
     return 0;
   }
+  bool find_not_null_fields(table_map allowed)
+  {
+    return false;
+  }
   bool fix_fields(THD *thd, Item **ref);
   bool eq(const Item *, bool binary_cmp) const;
   /* The following should be safe, even if we compare doubles */
@@ -3015,7 +3047,7 @@ public:
   }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_match>(thd, this); }
-  Item *build_clone(THD *thd) { return 0; }
+  Item *build_clone(THD *thd, const Build_clone_prm &prm) { return 0; }
 private:
   /**
      Check whether storage engine for given table, 
@@ -3303,6 +3335,10 @@ public:
   }
   bool excl_dep_on_grouping_fields(st_select_lex *sel)
   { return false; }
+  bool find_not_null_fields(table_map allowed)
+  {
+    return false;
+  }
 };
 
 
@@ -3406,6 +3442,10 @@ public:
   {
     not_null_tables_cache= 0;
     return 0;
+  }
+  bool find_not_null_fields(table_map allowed)
+  {
+    return false;
   }
   bool const_item() const { return 0; }
   void evaluate_sideeffects();

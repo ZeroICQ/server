@@ -2574,7 +2574,7 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
      0 if an error occured
 */ 
 
-Item* Item_func_or_sum::build_clone(THD *thd)
+Item* Item_func_or_sum::build_clone(THD *thd, const Build_clone_prm &prm)
 {
   Item_func_or_sum *copy= (Item_func_or_sum *) get_copy(thd);
   if (unlikely(!copy))
@@ -2592,12 +2592,32 @@ Item* Item_func_or_sum::build_clone(THD *thd)
    
   for (uint i= 0; i < arg_count; i++)
   {
-    Item *arg_clone= args[i]->build_clone(thd);
+    Item *arg_clone= args[i]->build_clone(thd, prm);
     if (!arg_clone)
       return 0;
     copy->args[i]= arg_clone;
   }
   return copy;
+}
+
+int Item_func_or_sum::substitute_expr_with_vcol(Subst_expr_prm *prm)
+{
+  // check if can replace whole current item
+  if (int repl = Item::substitute_expr_with_vcol(prm))
+  {
+    return repl;
+  }
+  // save item_ptr to restore it later
+  Item **tmp_item_ptr = prm->item_ptr;
+  int count = 0;
+  for (uint i = 0; i < arg_count; i++)
+  {
+    prm->item_ptr = &args[i];
+    count += args[i]->substitute_expr_with_vcol(prm);
+  }
+
+  prm->item_ptr = tmp_item_ptr;
+  return count;
 }
 
 Item_sp::Item_sp(THD *thd, Name_resolution_context *context_arg,
@@ -2874,13 +2894,13 @@ Item_sp::init_result_field(THD *thd, uint max_length, uint maybe_null,
      0 if an error occured
 */ 
 
-Item* Item_ref::build_clone(THD *thd)
+Item* Item_ref::build_clone(THD *thd, const Build_clone_prm &prm)
 {
   Item_ref *copy= (Item_ref *) get_copy(thd);
   if (unlikely(!copy) ||
       unlikely(!(copy->ref= (Item**) alloc_root(thd->mem_root,
                                                 sizeof(Item*)))) ||
-      unlikely(!(*copy->ref= (* ref)->build_clone(thd))))
+      unlikely(!(*copy->ref= (* ref)->build_clone(thd, prm))))
     return 0;
   return copy;
 }
@@ -3336,6 +3356,16 @@ table_map Item_field::all_used_tables() const
 }
 
 
+bool Item_field::find_not_null_fields(table_map allowed)
+{
+  if (field->table->const_table)
+    return false;
+  if (!get_depended_from() && field->real_maybe_null())
+    bitmap_set_bit(&field->table->tmp_set, field->field_index);
+  return false;
+}
+
+
 /*
   @Note  thd->fatal_error can be set in case of OOM
 */
@@ -3772,6 +3802,20 @@ my_decimal *Item_null::val_decimal(my_decimal *decimal_value)
 }
 
 
+longlong Item_null::val_datetime_packed(THD *)
+{
+  null_value= true;
+  return 0;
+}
+
+
+longlong Item_null::val_time_packed(THD *)
+{
+  null_value= true;
+  return 0;
+}
+
+
 bool Item_null::get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate)
 {
   set_zero_time(ltime, MYSQL_TIMESTAMP_NONE);
@@ -4104,12 +4148,12 @@ bool Item_param::set_longdata(const char *str, ulong length)
     (here), and first have to concatenate all pieces together,
     write query to the binary log and only then perform conversion.
   */
-  if (value.m_string.length() + length > max_long_data_size)
+  if (value.m_string.length() + length > current_thd->variables.max_allowed_packet)
   {
     my_message(ER_UNKNOWN_ERROR,
                "Parameter of prepared statement which is set through "
                "mysql_send_long_data() is longer than "
-               "'max_long_data_size' bytes",
+               "'max_allowed_packet' bytes",
                MYF(0));
     DBUG_RETURN(true);
   }
@@ -7360,7 +7404,7 @@ Item *Item::build_pushable_cond(THD *thd,
     return new_cond;
   }
   else if (get_extraction_flag() != NO_EXTRACTION_FL)
-    return build_clone(thd);
+    return build_clone(thd, {});
   return 0;
 }
 
@@ -7474,7 +7518,7 @@ Item *Item_field::derived_field_transformer_for_where(THD *thd, uchar *arg)
   Item *producing_item= find_producing_item(this, sel);
   if (producing_item)
   {
-    Item *producing_clone= producing_item->build_clone(thd);
+    Item *producing_clone= producing_item->build_clone(thd, {});
     if (producing_clone)
       producing_clone->marker|= SUBSTITUTION_FL;
     return producing_clone;
@@ -7492,7 +7536,7 @@ Item *Item_direct_view_ref::derived_field_transformer_for_where(THD *thd,
     st_select_lex *sel= (st_select_lex *)arg;
     Item *producing_item= find_producing_item(this, sel);
     DBUG_ASSERT (producing_item != NULL);
-    return producing_item->build_clone(thd);
+    return producing_item->build_clone(thd, {});
   }
   return (*ref);
 }
@@ -7505,7 +7549,7 @@ Item *Item_field::grouping_field_transformer_for_where(THD *thd, uchar *arg)
   if (gr_field)
   {
     Item *producing_clone=
-      gr_field->corresponding_item->build_clone(thd);
+      gr_field->corresponding_item->build_clone(thd, {});
     if (producing_clone)
       producing_clone->marker|= SUBSTITUTION_FL;
     return producing_clone;
@@ -7528,7 +7572,7 @@ Item_direct_view_ref::grouping_field_transformer_for_where(THD *thd,
   st_select_lex *sel= (st_select_lex *)arg;
   Field_pair *gr_field= find_matching_field_pair(this,
                                                  sel->grouping_tmp_fields);
-  return gr_field->corresponding_item->build_clone(thd);
+  return gr_field->corresponding_item->build_clone(thd, {});
 }
 
 void Item_field::print(String *str, enum_query_type query_type)
@@ -8210,6 +8254,24 @@ bool Item_ref::get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate)
 bool Item_ref::val_native(THD *thd, Native *to)
 {
   return val_native_from_item(thd, *ref, to);
+}
+
+
+longlong Item_ref::val_datetime_packed(THD *thd)
+{
+  DBUG_ASSERT(fixed);
+  longlong tmp= (*ref)->val_datetime_packed(thd);
+  null_value= (*ref)->null_value;
+  return tmp;
+}
+
+
+longlong Item_ref::val_time_packed(THD *thd)
+{
+  DBUG_ASSERT(fixed);
+  longlong tmp= (*ref)->val_time_packed(thd);
+  null_value= (*ref)->null_value;
+  return tmp;
 }
 
 
@@ -9268,8 +9330,6 @@ int Item_default_value::save_in_field(Field *field_arg, bool no_conversions)
     return Item_field::save_in_field(field_arg, no_conversions);
   }
 
-  if (field_arg->default_value && field_arg->default_value->flags)
-    return 0; // defaut fields will be set later, no need to do it twice
   return field_arg->save_in_field_default_value(context->error_processor ==
                                                 &view_error_processor);
 }
@@ -9516,7 +9576,7 @@ bool Item_trigger_field::set_value(THD *thd, sp_rcontext * /*ctx*/, Item **it)
   int err_code= item->save_in_field(field, 0);
 
   field->table->copy_blobs= copy_blobs_saved;
-  field->set_explicit_default(item);
+  field->set_has_explicit_value();
 
   return err_code < 0;
 }
@@ -10482,4 +10542,25 @@ void Item::register_in(THD *thd)
 {
   next= thd->free_list;
   thd->free_list= this;
+}
+
+int Item::substitute_expr_with_vcol(Subst_expr_prm *prm)
+{
+  Item* replacement = find_vfield_replacement(prm->thd, *prm->item_ptr,
+                                              prm->vfield);
+  if (replacement)
+  {
+    *prm->item_ptr = replacement;
+    return 1;
+  }
+  return 0;
+}
+
+Item* Item::find_vfield_replacement(THD *thd, Item *item, Field* vfield)
+{
+  Item *vcol_expr = vfield->vcol_info->expr;
+  // fixing fields later in rewrite_expr_with_vfieds
+  return item->eq(vcol_expr, false)
+    ? new (thd->mem_root) Item_field(thd, vfield)
+    : NULL;
 }

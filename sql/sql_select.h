@@ -695,6 +695,10 @@ enum_nested_loop_state
 end_write_group(JOIN *join, JOIN_TAB *join_tab __attribute__((unused)),
 		bool end_of_records);
 
+void rewrite_expr_with_vfieds(THD *thd, Name_resolution_context *context, Item **select_where);
+// collect all vcols that has indexes over them
+List<Field*> get_vfields_with_indexes(Name_resolution_context *context);
+
 
 struct st_position;
 
@@ -854,6 +858,7 @@ public:
   friend void best_access_path(JOIN      *join,
                                JOIN_TAB  *s,
                                table_map remaining_tables,
+                               const struct st_position *join_positions,
                                uint      idx,
                                bool      disable_jbuf,
                                double    record_count,
@@ -882,7 +887,7 @@ public:
   void set_empty()
   {
     sjm_scan_need_tables= 0;
-    LINT_INIT_STRUCT(sjm_scan_last_inner);
+    sjm_scan_last_inner= 0;
     is_used= FALSE;
   }
   void set_from_prev(struct st_position *prev);
@@ -1781,8 +1786,10 @@ public:
   void add_keyuses_for_splitting();
   bool inject_best_splitting_cond(table_map remaining_tables);
   bool fix_all_splittings_in_plan();
+  void make_notnull_conds_for_range_scans();
 
   bool transform_in_predicates_into_in_subq(THD *thd);
+  void optimize_vfields_expressions();
 private:
   /**
     Create a temporary table to be used for processing DISTINCT/ORDER
@@ -2071,6 +2078,11 @@ protected:
   }
 };
 
+void best_access_path(JOIN *join, JOIN_TAB *s,
+                      table_map remaining_tables,
+                      const POSITION *join_positions, uint idx,
+                      bool disable_jbuf, double record_count,
+                      POSITION *pos, POSITION *loose_scan_pos);
 bool cp_buffer_from_ref(THD *thd, TABLE *table, TABLE_REF *ref);
 bool error_if_full_join(JOIN *join);
 int report_error(TABLE *table, int error);
@@ -2442,7 +2454,7 @@ bool instantiate_tmp_table(TABLE *table, KEY *keyinfo,
                            ulonglong options);
 bool open_tmp_table(TABLE *table);
 void setup_tmp_table_column_bitmaps(TABLE *table, uchar *bitmaps);
-double prev_record_reads(POSITION *positions, uint idx, table_map found_ref);
+double prev_record_reads(const POSITION *positions, uint idx, table_map found_ref);
 void fix_list_after_tbl_changes(SELECT_LEX *new_parent, List<TABLE_LIST> *tlist);
 double get_tmp_table_lookup_cost(THD *thd, double row_count, uint row_size);
 double get_tmp_table_write_cost(THD *thd, double row_count, uint row_size);

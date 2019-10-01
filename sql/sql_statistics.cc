@@ -1,4 +1,5 @@
 /* Copyright (C) 2009 MySQL AB
+   Copyright (c) 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1023,7 +1024,9 @@ public:
   {
     char buff[MAX_FIELD_WIDTH];
     String val(buff, sizeof(buff), &my_charset_bin);
+    my_bitmap_map *old_map;
 
+    old_map= dbug_tmp_use_all_columns(stat_table, stat_table->read_set);
     for (uint i= COLUMN_STAT_MIN_VALUE; i <= COLUMN_STAT_HISTOGRAM; i++)
     {  
       Field *stat_field= stat_table->field[i];
@@ -1081,6 +1084,7 @@ public:
         }
       }
     }
+    dbug_tmp_restore_column_map(stat_table->read_set, old_map);
   }
 
 
@@ -1820,16 +1824,13 @@ public:
   bool is_partial_fields_present;
 
   Index_prefix_calc(THD *thd, TABLE *table, KEY *key_info)
-    : index_table(table), index_info(key_info)
+    : index_table(table), index_info(key_info), prefixes(0), empty(true),
+    calc_state(NULL), is_single_comp_pk(false), is_partial_fields_present(false)
   {
     uint i;
     Prefix_calc_state *state;
     uint key_parts= table->actual_n_key_parts(key_info);
-    empty= TRUE;
-    prefixes= 0;
-    LINT_INIT_STRUCT(calc_state);
 
-    is_partial_fields_present= is_single_comp_pk= FALSE;
     uint pk= table->s->primary_key;
     if ((uint) (table->key_info - key_info) == pk &&
         table->key_info[pk].user_defined_key_parts == 1)
@@ -1988,7 +1989,7 @@ void create_min_max_statistical_fields_for_table(TABLE *table)
         my_ptrdiff_t diff= record-table->record[0];
         if (!bitmap_is_set(table->read_set, table_field->field_index))
           continue; 
-        if (!(fld= table_field->clone(&table->mem_root, table, diff, TRUE)))
+        if (!(fld= table_field->clone(&table->mem_root, table, diff)))
           continue;
         if (i == 0)
           table_field->collected_stats->min_value= fld;
@@ -2055,7 +2056,7 @@ void create_min_max_statistical_fields_for_table_share(THD *thd,
         Field *fld;
         Field *table_field= *field_ptr;
         my_ptrdiff_t diff= record - table_share->default_values;
-        if (!(fld= table_field->clone(&stats_cb->mem_root, diff)))
+        if (!(fld= table_field->clone(&stats_cb->mem_root, NULL, diff)))
           continue;
         if (i == 0)
           table_field->read_stats->min_value= fld;
@@ -2133,6 +2134,7 @@ int alloc_statistics_for_table(THD* thd, TABLE *table)
     if ((histogram= (uchar *) alloc_root(&table->mem_root,
                                          hist_size * columns)))
       bzero(histogram, hist_size * columns);
+
   }
 
   if (!table_stats || !column_stats || !index_stats || !idx_avg_frequency ||
@@ -3048,8 +3050,12 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
   KEY *key_info, *key_info_end;
   TABLE_SHARE *table_share= table->s;
   Table_statistics *read_stats= table_share->stats_cb.table_stats;
+  enum_check_fields old_check_level= thd->count_cuted_fields;
 
   DBUG_ENTER("read_statistics_for_table");
+
+  /* Don't write warnings for internal field conversions */
+  thd->count_cuted_fields= CHECK_FIELD_IGNORE;
 
   /* Read statistics from the statistical table table_stats */
   stat_table= stat_tables[TABLE_STAT].table;
@@ -3131,6 +3137,7 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
   }
 
   table->stats_is_read= TRUE;
+  thd->count_cuted_fields= old_check_level;
 
   DBUG_RETURN(0);
 }

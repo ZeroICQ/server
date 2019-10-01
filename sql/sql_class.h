@@ -274,8 +274,14 @@ class Key_part_spec :public Sql_alloc {
 public:
   LEX_CSTRING field_name;
   uint length;
+  // used to create hidden columns for indexes on expressions
+  Virtual_column_info *vfield;
   Key_part_spec(const LEX_CSTRING *name, uint len)
-    : field_name(*name), length(len)
+    : field_name(*name), length(len), vfield(NULL)
+  {}
+
+  Key_part_spec(Virtual_column_info *vfield_info)
+    : field_name{NULL, 0}, length(0), vfield(vfield_info)
   {}
   bool operator==(const Key_part_spec& other) const;
   /**
@@ -385,6 +391,7 @@ public:
   */
   virtual Key *clone(MEM_ROOT *mem_root) const
     { return new (mem_root) Key(*this, mem_root); }
+  bool has_index_on_hidden_fields();
 };
 
 
@@ -766,6 +773,7 @@ typedef struct system_variables
   ulong session_track_transaction_info;
   my_bool session_track_schema;
   my_bool session_track_state_change;
+  my_bool session_track_user_variables;
   my_bool tcp_nodelay;
 
   ulong threadpool_priority;
@@ -3444,6 +3452,7 @@ private:
     {
       system_time.sec= sec;
       system_time.sec_part= sec_part;
+      system_time.start= hrtime;
     }
     else
     {
@@ -4684,9 +4693,7 @@ private:
   AUTHID invoker;
 
 public:
-#ifndef EMBEDDED_LIBRARY
   Session_tracker session_tracker;
-#endif //EMBEDDED_LIBRARY
   /*
     Flag, mutex and condition for a thread to wait for a signal from another
     thread.
@@ -5708,17 +5715,18 @@ public:
 
 class select_unit :public select_result_interceptor
 {
+protected:
   uint curr_step, prev_step, curr_sel;
   enum sub_select_type step;
 public:
-  Item_int *intersect_mark;
   TMP_TABLE_PARAM tmp_table_param;
+  /* Number of additional (hidden) field of the used temporary table */
+  int addon_cnt;
   int write_err; /* Error code from the last send_data->ha_write_row call. */
   TABLE *table;
 
   select_unit(THD *thd_arg):
-    select_result_interceptor(thd_arg),
-    intersect_mark(0), table(0)
+    select_result_interceptor(thd_arg), addon_cnt(0), table(0)
   {
     init();
     tmp_table_param.init();
@@ -5735,6 +5743,9 @@ public:
   virtual bool postponed_prepare(List<Item> &types)
   { return false; }
   int send_data(List<Item> &items);
+  int write_record();
+  int update_counter(Field *counter, longlong value);
+  int delete_record();
   bool send_eof();
   virtual bool flush();
   void cleanup();
@@ -5753,7 +5764,148 @@ public:
     step= UNION_TYPE;
     write_err= 0;
   }
+  virtual void change_select();
+  virtual bool force_enable_index_if_needed() { return false; }
+};
+
+
+/**
+  @class select_unit_ext
+
+  The class used when processing rows produced by operands of query expressions
+  containing INTERSECT ALL and/or EXCEPT all operations. One or two extra fields
+  of the temporary to store the rows of the partial and final result can be employed.
+  Both of them contain counters. The second additional field is used only when
+  the processed query expression contains INTERSECT ALL.
+
+  Consider how these extra fields are used.
+
+  Let
+    table t1 (f char(8))
+    table t2 (f char(8))
+    table t3 (f char(8))
+  contain the following sets:
+    ("b"),("a"),("d"),("c"),("b"),("a"),("c"),("a")
+    ("c"),("b"),("c"),("c"),("a"),("b"),("g")
+    ("c"),("a"),("b"),("d"),("b"),("e")
+
+  - Let's demonstrate how the the set operation INTERSECT ALL is proceesed
+    for the query
+              SELECT f FROM t1 INTERSECT ALL SELECT f FROM t2
+
+    When send_data() is called for the rows of the first operand we put
+    the processed record into the temporary table if there was no such record
+    setting dup_cnt field to 1 and add_cnt field to 0 and increment the
+    counter in the dup_cnt field by one otherwise. We get
+
+      |add_cnt|dup_cnt| f |
+      |0      |2      |b  |
+      |0      |3      |a  |
+      |0      |1      |d  |
+      |0      |2      |c  |
+
+    The call of send_eof() for the first operand swaps the values stored in
+    dup_cnt and add_cnt. After this, we'll see the following rows in the
+    temporary table
+
+      |add_cnt|dup_cnt| f |
+      |2      |0      |b  |
+      |3      |0      |a  |
+      |1      |0      |d  |
+      |2      |0      |c  |
+
+    When send_data() is called for the rows of the second operand we increment
+    the counter in dup_cnt if the processed row is found in the table and do
+    nothing otherwise. As a result we get
+
+      |add_cnt|dup_cnt| f |
+      |2      |2      |b  |
+      |3      |1      |a  |
+      |1      |0      |d  |
+      |2      |3      |c  |
+
+    At the call of send_eof() for the second operand first we disable index.
+    Then for each record, the minimum of counters from dup_cnt and add_cnt m is
+    taken. If m == 0 then the record is deleted. Otherwise record is replaced
+    with m copies of it. Yet the counter in this copies are set to 1 for
+    dup_cnt and to 0 for add_cnt
+
+      |add_cnt|dup_cnt| f |
+      |0      |1      |b  |
+      |0      |1      |b  |
+      |0      |1      |a  |
+      |0      |1      |c  |
+      |0      |1      |c  |
+
+  - Let's demonstrate how the the set operation EXCEPT ALL is proceesed
+    for the query
+              SELECT f FROM t1 EXCEPT ALL SELECT f FROM t3
+
+    Only one additional counter field dup_cnt is used for EXCEPT ALL.
+    After the first operand has been processed we have in the temporary table
+
+      |dup_cnt| f |
+      |2      |b  |
+      |3      |a  |
+      |1      |d  |
+      |2      |c  |
+
+    When send_data() is called for the rows of the second operand we decrement
+    the counter in dup_cnt if the processed row is found in the table and do
+    nothing otherwise. If the counter becomes 0 we delete the record
+
+      |dup_cnt| f |
+      |2      |a  |
+      |1      |c  |
+
+    Finally at the call of send_eof() for the second operand we disable index
+    unfold rows adding duplicates
+
+      |dup_cnt| f |
+      |1      |a  |
+      |1      |a  |
+      |1      |c  |
+ */
+
+class select_unit_ext :public select_unit
+{
+public:
+  select_unit_ext(THD *thd_arg):
+    select_unit(thd_arg), increment(0), is_index_enabled(TRUE), 
+    curr_op_type(UNSPECIFIED)
+  {
+  };
+  int send_data(List<Item> &items);
   void change_select();
+  int unfold_record(ha_rows cnt);
+  bool send_eof();
+  bool force_enable_index_if_needed()
+  {
+    is_index_enabled= true;
+    return true;
+  }
+  bool disable_index_if_needed(SELECT_LEX *curr_sl);
+  
+  /* 
+    How to change increment/decrement the counter in duplicate_cnt field 
+    when processing a record produced by the current operand in send_data().
+    The value can be 1 or -1
+  */
+  int increment;
+  /* TRUE <=> the index of the result temporary table is enabled */
+  bool is_index_enabled;
+  /* The type of the set operation currently executed */
+  enum set_op_type curr_op_type;
+  /* 
+    Points to the extra field of the temporary table where
+    duplicate counters are stored
+  */ 
+  Field *duplicate_cnt;
+  /* 
+    Points to the extra field of the temporary table where additional
+    counters used only for INTERSECT ALL operations are stored
+  */
+  Field *additional_cnt;
 };
 
 class select_union_recursive :public select_unit
@@ -6017,7 +6169,10 @@ public:
 
   uint tables; /* Number of tables in the sj-nest */
 
-  /* Expected #rows in the materialized table */
+  /* Number of rows in the materialized table, before the de-duplication */
+  double rows_with_duplicates;
+
+  /* Expected #rows in the materialized table, after de-duplication */
   double rows;
 
   /* 
@@ -6172,7 +6327,7 @@ class user_var_entry
 
   double val_real(bool *null_value);
   longlong val_int(bool *null_value) const;
-  String *val_str(bool *null_value, String *str, uint decimals);
+  String *val_str(bool *null_value, String *str, uint decimals) const;
   my_decimal *val_decimal(bool *null_value, my_decimal *result);
   CHARSET_INFO *charset() const { return m_charset; }
   void set_charset(CHARSET_INFO *cs) { m_charset= cs; }
@@ -6947,11 +7102,12 @@ void dbug_serve_apcs(THD *thd, int n_calls);
 class ScopedStatementReplication
 {
 public:
-  ScopedStatementReplication(THD *thd) : thd(thd)
-  {
-    if (thd)
-      saved_binlog_format= thd->set_current_stmt_binlog_format_stmt();
-  }
+  ScopedStatementReplication(THD *thd) :
+    saved_binlog_format(thd
+                        ? thd->set_current_stmt_binlog_format_stmt()
+                        : BINLOG_FORMAT_MIXED),
+    thd(thd)
+  {}
   ~ScopedStatementReplication()
   {
     if (thd)
@@ -6959,8 +7115,8 @@ public:
   }
 
 private:
-  enum_binlog_format saved_binlog_format;
-  THD *thd;
+  const enum_binlog_format saved_binlog_format;
+  THD *const thd;
 };
 
 

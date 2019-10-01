@@ -763,11 +763,16 @@ public:
   enum cond_result { COND_UNDEF,COND_OK,COND_TRUE,COND_FALSE };
 
   enum traverse_order { POSTFIX, PREFIX };
+
+  struct Build_clone_prm
+  {
+    bool return_this_on_subselects = false;
+  };
   
   /* Cache of the result of is_expensive(). */
   int8 is_expensive_cache;
   
-  /* Reuse size, only used by SP local variable assignment, otherwize 0 */
+  /* Reuse size, only used by SP local variable assignment, otherwise 0 */
   uint rsize;
 
 protected:
@@ -1467,7 +1472,6 @@ public:
   {
     return type_handler()->Item_val_bool(this);
   }
-  virtual String *val_raw(String*) { return 0; }
 
   bool eval_const_cond()
   {
@@ -1498,6 +1502,32 @@ public:
     return Converter_double_to_longlong_with_warn(val_real(), false).result();
   }
   longlong val_int_from_str(int *error);
+
+  /*
+    Returns true if this item can be calculated during
+    value_depends_on_sql_mode()
+  */
+  bool value_depends_on_sql_mode_const_item()
+  {
+    /*
+      Currently we use value_depends_on_sql_mode() only for virtual
+      column expressions. They should not contain any expensive items.
+      If we ever get a crash on the assert below, it means
+      check_vcol_func_processor() is badly implemented for this item.
+    */
+    DBUG_ASSERT(!is_expensive());
+    /*
+      It should return const_item() actually.
+      But for some reasons Item_field::const_item() returns true
+      at value_depends_on_sql_mode() call time.
+      This should be checked and fixed.
+    */
+    return basic_const_item();
+  }
+  virtual Sql_mode_dependency value_depends_on_sql_mode() const
+  {
+    return Sql_mode_dependency();
+  }
 
   int save_time_in_field(Field *field, bool no_conversions);
   int save_date_in_field(Field *field, bool no_conversions);
@@ -1567,7 +1597,10 @@ public:
   virtual bool is_order_clause_position() const { return false; }
   /* cloning of constant items (0 if it is not const) */
   virtual Item *clone_item(THD *thd) { return 0; }
-  virtual Item* build_clone(THD *thd) { return get_copy(thd); }
+  virtual Item* build_clone(THD *thd, const Build_clone_prm &prm)
+  {
+    return get_copy(thd);
+  }
   virtual cond_result eq_cmp_result() const { return COND_OK; }
   inline uint float_length(uint decimals_par) const
   { return decimals < FLOATING_POINT_DECIMALS ? (DBL_DIG+2+decimals_par) : DBL_DIG+8;}
@@ -2009,7 +2042,46 @@ public:
     If there is some, sets a bit for this key in the proper key map.
   */
   virtual bool check_index_dependence(void *arg) { return 0; }
+  virtual bool rewrite_subselects_with_vfields_processor(void *arg) { return 0; }
   /*============== End of Item processor list ======================*/
+
+  /*
+    Given a condition P from the WHERE clause or from an ON expression of
+    the processed SELECT S and a set of join tables from S marked in the
+    parameter 'allowed'={T} a call of P->find_not_null_fields({T}) has to
+    find the set fields {F} of the tables from 'allowed' such that:
+    - each field from {F} is declared as nullable
+    - each record of table t from {T} that contains NULL as the value for at
+      at least one field from {F} can be ignored when building the result set
+      for S
+    It is assumed here that the condition P is conjunctive and all its column
+    references belong to T.
+
+    Examples:
+      CREATE TABLE t1 (a int, b int);
+      CREATE TABLE t2 (a int, b int);
+
+      SELECT * FROM t1,t2 WHERE t1.a=t2.a and t1.b > 5;
+      A call of find_not_null_fields() for the whole WHERE condition and {t1,t2}
+      should find {t1.a,t1.b,t2.a}
+
+      SELECT * FROM t1 LEFT JOIN ON (t1.a=t2.a and t2.a > t2.b);
+      A call of find_not_null_fields() for the ON expression and {t2}
+      should find {t2.a,t2.b}
+
+    The function returns TRUE if it succeeds to prove that all records of
+    a table from {T} can be ignored. Otherwise it always returns FALSE.
+
+    Example:
+      SELECT * FROM t1,t2 WHERE t1.a=t2.a AND t2.a IS NULL;
+    A call of find_not_null_fields() for the WHERE condition and {t1,t2}
+    will return TRUE.
+
+    It is assumed that the implementation of this virtual function saves
+    the info on the found set of fields in the structures associates with
+    tables from {T}.
+  */
+  virtual bool find_not_null_fields(table_map allowed) { return false; }
 
   virtual Item *get_copy(THD *thd)=0;
 
@@ -2037,6 +2109,13 @@ public:
     uint count;
     int nest_level;
     bool collect;
+  };
+
+  struct Subst_expr_prm
+  {
+    THD *thd;
+    Item **item_ptr;
+    Field *vfield;
   };
 
   /*
@@ -2332,6 +2411,11 @@ public:
     Checks if this item consists in the left part of arg IN subquery predicate
   */
   bool pushable_equality_checker_for_subquery(uchar *arg);
+  /*
+   * returns number of replacements
+   */
+  virtual int substitute_expr_with_vcol(Subst_expr_prm *prm);
+  Item* find_vfield_replacement(THD *thd, Item *item, Field* vfield);
 };
 
 MEM_ROOT *get_thd_memroot(THD *thd);
@@ -2561,6 +2645,7 @@ public:
   inline Item **arguments() const { return args; }
   inline uint argument_count() const { return arg_count; }
   inline void remove_arguments() { arg_count=0; }
+  Sql_mode_dependency value_depends_on_sql_mode_bit_or() const;
 };
 
 
@@ -3313,6 +3398,10 @@ public:
   {
     return MONOTONIC_STRICT_INCREASING;
   }
+  Sql_mode_dependency value_depends_on_sql_mode() const
+  {
+    return Sql_mode_dependency(0, field->value_depends_on_sql_mode());
+  }
   longlong val_int_endpoint(bool left_endp, bool *incl_endp);
   bool get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate);
   bool get_date_result(THD *thd, MYSQL_TIME *ltime,date_mode_t fuzzydate);
@@ -3356,6 +3445,7 @@ public:
   bool is_result_field() { return false; }
   void save_in_result_field(bool no_conversions);
   Item *get_tmp_table_item(THD *thd);
+  bool find_not_null_fields(table_map allowed);
   bool collect_item_field_processor(void * arg);
   bool add_field_to_set_processor(void * arg);
   bool find_item_in_field_list_processor(void *arg);
@@ -3517,6 +3607,8 @@ public:
   String *val_str(String *str);
   my_decimal *val_decimal(my_decimal *);
   bool get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate);
+  longlong val_datetime_packed(THD *);
+  longlong val_time_packed(THD *);
   int save_in_field(Field *field, bool no_conversions);
   int save_safe_in_field(Field *field);
   bool send(Protocol *protocol, st_value *buffer);
@@ -5000,6 +5092,12 @@ public:
   bool const_item() const { return const_item_cache; }
   table_map used_tables() const { return used_tables_cache; }
   Item* build_clone(THD *thd);
+  Sql_mode_dependency value_depends_on_sql_mode() const
+  {
+    return Item_args::value_depends_on_sql_mode_bit_or().soft_to_hard();
+  }
+  Item* build_clone(THD *thd, const Build_clone_prm &prm);
+  int substitute_expr_with_vcol(Subst_expr_prm *prm);
 };
 
 class sp_head;
@@ -5101,6 +5199,8 @@ public:
   bool val_native(THD *thd, Native *to);
   bool is_null();
   bool get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate);
+  longlong val_datetime_packed(THD *);
+  longlong val_time_packed(THD *);
   double val_result();
   longlong val_int_result();
   String *str_result(String* tmp);
@@ -5150,6 +5250,10 @@ public:
   table_map not_null_tables() const 
   { 
     return depended_from ? 0 : (*ref)->not_null_tables();
+  }
+  bool find_not_null_fields(table_map allowed)
+  {
+    return depended_from ? false : (*ref)->find_not_null_fields(allowed);
   }
   void save_in_result_field(bool no_conversions)
   {
@@ -5234,7 +5338,7 @@ public:
     return (*ref)->is_outer_field();
   }
   
-  Item* build_clone(THD *thd);
+  Item* build_clone(THD *thd, const Build_clone_prm &prm);
 
   /**
     Checks if the item tree that ref points to contains a subquery.
@@ -5496,7 +5600,7 @@ public:
   }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_cache_wrapper>(thd, this); }
-  Item *build_clone(THD *thd) { return 0; }
+  Item *build_clone(THD *thd, const Build_clone_prm &prm) { return 0; }
 };
 
 

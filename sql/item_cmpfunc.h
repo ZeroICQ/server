@@ -132,6 +132,9 @@ public:
   int compare_e_json_str();
   int compare_e_str_json();
 
+  void min_max_update_field_native(THD *thd, Field *field, Item *item,
+                                   int cmp_sign);
+
   Item** cache_converted_constant(THD *thd, Item **value, Item **cache,
                                   const Type_handler *type);
   inline bool is_owner_equal_func()
@@ -289,6 +292,7 @@ public:
     Item_func_truth(thd, a, true, false) {}
   ~Item_func_isnottrue() {}
   virtual const char* func_name() const { return "isnottrue"; }
+  bool find_not_null_fields(table_map allowed) { return false; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_isnottrue>(thd, this); }
   bool eval_not_null_tables(void *) { not_null_tables_cache= 0; return false; }
@@ -321,6 +325,7 @@ public:
     Item_func_truth(thd, a, false, false) {}
   ~Item_func_isnotfalse() {}
   virtual const char* func_name() const { return "isnotfalse"; }
+  bool find_not_null_fields(table_map allowed) { return false; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_isnotfalse>(thd, this); }
   bool eval_not_null_tables(void *) { not_null_tables_cache= 0; return false; }
@@ -383,6 +388,7 @@ public:
   virtual void get_cache_parameters(List<Item> &parameters);
   bool is_top_level_item();
   bool eval_not_null_tables(void *opt_arg);
+  bool find_not_null_fields(table_map allowed);
   void fix_after_pullout(st_select_lex *new_parent, Item **ref, bool merge);
   bool invisible_mode();
   void reset_cache() { cache= NULL; }
@@ -512,6 +518,7 @@ public:
   Item_bool_rowready_func2(THD *thd, Item *a, Item *b):
     Item_bool_func2_with_rev(thd, a, b), cmp(tmp_arg, tmp_arg + 1)
   { }
+  Sql_mode_dependency value_depends_on_sql_mode() const;
   void print(String *str, enum_query_type query_type)
   {
     Item_func::print_op(str, query_type);
@@ -551,10 +558,10 @@ public:
     return add_key_fields_optimize_op(join, key_fields, and_level,
                                       usable_tables, sargables, false);
   }
-  Item *build_clone(THD *thd)
+  Item *build_clone(THD *thd, const Build_clone_prm &prm)
   {
     Item_bool_rowready_func2 *clone=
-      (Item_bool_rowready_func2 *) Item_func::build_clone(thd);
+      (Item_bool_rowready_func2 *) Item_func::build_clone(thd, prm);
     if (clone)
     {
       clone->cmp.comparators= 0;
@@ -578,6 +585,7 @@ public:
   void print(String *str, enum_query_type query_type)
   { Item_func::print_op(str, query_type); }
   longlong val_int();
+  bool find_not_null_fields(table_map allowed) { return false; }
   Item *neg_transformer(THD *thd);
   Item* propagate_equal_fields(THD *thd, const Context &ctx, COND_EQUAL *cond)
   {
@@ -599,6 +607,7 @@ public:
   longlong val_int();
   enum Functype functype() const { return NOT_FUNC; }
   const char *func_name() const { return "not"; }
+  bool find_not_null_fields(table_map allowed) { return false; }
   enum precedence precedence() const { return BANG_PRECEDENCE; }
   Item *neg_transformer(THD *thd);
   bool fix_fields(THD *, Item **);
@@ -743,6 +752,7 @@ public:
   longlong val_int();
   bool fix_length_and_dec();
   table_map not_null_tables() const { return 0; }
+  bool find_not_null_fields(table_map allowed) { return false; }
   enum Functype functype() const { return EQUAL_FUNC; }
   enum Functype rev_functype() const { return EQUAL_FUNC; }
   cond_result eq_cmp_result() const { return COND_TRUE; }
@@ -920,6 +930,7 @@ public:
   bool fix_length_and_dec_numeric(THD *);
   virtual void print(String *str, enum_query_type query_type);
   bool eval_not_null_tables(void *opt_arg);
+  bool find_not_null_fields(table_map allowed);
   void fix_after_pullout(st_select_lex *new_parent, Item **ref, bool merge);
   bool count_sargable_conds(void *arg);
   void add_key_fields(JOIN *join, KEY_FIELD **key_fields,
@@ -2261,10 +2272,10 @@ public:
   bool fix_length_and_dec();
   Item *propagate_equal_fields(THD *thd, const Context &ctx, COND_EQUAL *cond);
   Item *find_item();
-  Item *build_clone(THD *thd)
+  Item *build_clone(THD *thd, const Build_clone_prm &prm)
   {
     Item_func_case_simple *clone= (Item_func_case_simple *)
-                                  Item_func_case::build_clone(thd);
+                                  Item_func_case::build_clone(thd, prm);
     uint ncases= when_count();
     if (clone && clone->Predicant_to_list_comparator::init_clone(thd, ncases))
       return NULL;
@@ -2445,13 +2456,14 @@ public:
   const char *func_name() const { return "in"; }
   enum precedence precedence() const { return CMP_PRECEDENCE; }
   bool eval_not_null_tables(void *opt_arg);
+  bool find_not_null_fields(table_map allowed);
   void fix_after_pullout(st_select_lex *new_parent, Item **ref, bool merge);
   bool count_sargable_conds(void *arg);
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_in>(thd, this); }
-  Item *build_clone(THD *thd)
+  Item *build_clone(THD *thd, const Build_clone_prm &prm)
   {
-    Item_func_in *clone= (Item_func_in *) Item_func::build_clone(thd);
+    Item_func_in *clone= (Item_func_in *) Item_func::build_clone(thd, prm);
     if (clone)
     {
       clone->array= 0;
@@ -2588,6 +2600,7 @@ public:
   COND *remove_eq_conds(THD *thd, Item::cond_result *cond_value,
                         bool top_level);
   table_map not_null_tables() const { return 0; }
+  bool find_not_null_fields(table_map allowed);
   Item *neg_transformer(THD *thd);
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_isnull>(thd, this); }
@@ -2688,6 +2701,7 @@ public:
 
   bool get_negated() const { return negated; } // Used by ColumnStore
 
+  Sql_mode_dependency value_depends_on_sql_mode() const;
   longlong val_int();
   enum Functype functype() const { return LIKE_FUNC; }
   void print(String *str, enum_query_type query_type);
@@ -3009,9 +3023,11 @@ public:
   Item *compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
                 Item_transformer transformer, uchar *arg_t);
   bool eval_not_null_tables(void *opt_arg);
-  Item *build_clone(THD *thd);
+  bool find_not_null_fields(table_map allowed);
+  Item *build_clone(THD *thd, const Build_clone_prm &prm);
   bool excl_dep_on_table(table_map tab_map);
   bool excl_dep_on_grouping_fields(st_select_lex *sel);
+  int substitute_expr_with_vcol(Subst_expr_prm *prm);
 };
 
 template <template<class> class LI, class T> class Item_equal_iterator;
@@ -3174,6 +3190,7 @@ public:
     eval_item= NULL;
   }
   void update_used_tables();
+  bool find_not_null_fields(table_map allowed);
   COND *build_equal_items(THD *thd, COND_EQUAL *inherited,
                           bool link_item_fields,
                           COND_EQUAL **cond_equal_ref);

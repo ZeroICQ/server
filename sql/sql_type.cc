@@ -83,6 +83,10 @@ Type_handler_blob_compressed type_handler_blob_compressed;
 
 Type_handler_interval_DDhhmmssff type_handler_interval_DDhhmmssff;
 
+Vers_type_timestamp       vers_type_timestamp;
+Vers_type_trx             vers_type_trx;
+
+
 
 class Type_collection_std: public Type_collection
 {
@@ -1029,10 +1033,21 @@ bool Temporal::datetime_add_nanoseconds_or_invalidate(THD *thd, int *warn, ulong
   INTERVAL interval;
   memset(&interval, 0, sizeof(interval));
   interval.hour= 1;
-  /* date_add_interval cannot handle bad dates */
-  if (check_date(TIME_NO_ZERO_IN_DATE | TIME_NO_ZERO_DATE, warn) ||
-      date_add_interval(thd, this, INTERVAL_HOUR, interval))
+  /*
+    date_add_interval cannot handle bad dates with zero YYYY or MM.
+    Note, check_date(NO_ZERO_XX) does not check YYYY against zero,
+    so let's additionally check it.
+  */
+  if (year == 0 ||
+      check_date(TIME_NO_ZERO_IN_DATE | TIME_NO_ZERO_DATE, warn) ||
+      date_add_interval(thd, this, INTERVAL_HOUR, interval, false/*no warn*/))
   {
+    char buf[MAX_DATE_STRING_REP_LENGTH];
+    my_date_to_str(this, buf);
+    push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+                        ER_WRONG_VALUE_FOR_TYPE,
+                        ER_THD(thd, ER_WRONG_VALUE_FOR_TYPE),
+                        "date", buf, "round(datetime)");
     make_from_out_of_range(warn);
     return true;
   }
@@ -1384,48 +1399,173 @@ uint Type_handler_time::m_hires_bytes[MAX_DATETIME_PRECISION + 1]=
      { 3, 4, 4, 5, 5, 5, 6 };
 
 /***************************************************************************/
-const Name Type_handler_row::m_name_row(STRING_WITH_LEN("row"));
+const Name Type_handler_row::name() const
+{
+  static Name tmp(STRING_WITH_LEN("row"));
+  return tmp;
+}
 
-const Name Type_handler_null::m_name_null(STRING_WITH_LEN("null"));
+const Name Type_handler_null::name() const
+{
+  static Name tmp(STRING_WITH_LEN("null"));
+  return tmp;
+}
 
-const Name
-  Type_handler_string::m_name_char(STRING_WITH_LEN("char")),
-  Type_handler_var_string::m_name_var_string(STRING_WITH_LEN("varchar")),
-  Type_handler_varchar::m_name_varchar(STRING_WITH_LEN("varchar")),
-  Type_handler_hex_hybrid::m_name_hex_hybrid(STRING_WITH_LEN("hex_hybrid")),
-  Type_handler_tiny_blob::m_name_tinyblob(STRING_WITH_LEN("tinyblob")),
-  Type_handler_medium_blob::m_name_mediumblob(STRING_WITH_LEN("mediumblob")),
-  Type_handler_long_blob::m_name_longblob(STRING_WITH_LEN("longblob")),
-  Type_handler_blob::m_name_blob(STRING_WITH_LEN("blob"));
+const Name Type_handler_string::name() const
+{
+  static Name tmp(STRING_WITH_LEN("char"));
+  return tmp;
+}
 
-const Name
-  Type_handler_enum::m_name_enum(STRING_WITH_LEN("enum")),
-  Type_handler_set::m_name_set(STRING_WITH_LEN("set"));
+const Name Type_handler_var_string::name() const
+{
+  static Name tmp(STRING_WITH_LEN("varchar"));
+  return tmp;
+}
 
-const Name
-  Type_handler_bool::m_name_bool(STRING_WITH_LEN("boolean")),
-  Type_handler_tiny::m_name_tiny(STRING_WITH_LEN("tinyint")),
-  Type_handler_short::m_name_short(STRING_WITH_LEN("smallint")),
-  Type_handler_long::m_name_int(STRING_WITH_LEN("int")),
-  Type_handler_longlong::m_name_longlong(STRING_WITH_LEN("bigint")),
-  Type_handler_int24::m_name_mediumint(STRING_WITH_LEN("mediumint")),
-  Type_handler_year::m_name_year(STRING_WITH_LEN("year")),
-  Type_handler_bit::m_name_bit(STRING_WITH_LEN("bit"));
+const Name Type_handler_varchar::name() const
+{
+  static Name tmp(STRING_WITH_LEN("varchar"));
+  return tmp;
+}
 
-const Name
-  Type_handler_float::m_name_float(STRING_WITH_LEN("float")),
-  Type_handler_double::m_name_double(STRING_WITH_LEN("double"));
+const Name Type_handler_hex_hybrid::name() const
+{
+  static Name tmp(STRING_WITH_LEN("hex_hybrid"));
+  return tmp;
+}
 
-const Name
-  Type_handler_olddecimal::m_name_decimal(STRING_WITH_LEN("decimal")),
-  Type_handler_newdecimal::m_name_decimal(STRING_WITH_LEN("decimal"));
+const Name Type_handler_tiny_blob::name() const
+{
+  static Name tmp(STRING_WITH_LEN("tinyblob"));
+  return tmp;
+}
 
-const Name
-  Type_handler_time_common::m_name_time(STRING_WITH_LEN("time")),
-  Type_handler_date_common::m_name_date(STRING_WITH_LEN("date")),
-  Type_handler_datetime_common::m_name_datetime(STRING_WITH_LEN("datetime")),
-  Type_handler_timestamp_common::m_name_timestamp(STRING_WITH_LEN("timestamp"));
+const Name Type_handler_medium_blob::name() const
+{
+  static Name tmp(STRING_WITH_LEN("mediumblob"));
+  return tmp;
+}
 
+const Name Type_handler_long_blob::name() const
+{
+  static Name tmp(STRING_WITH_LEN("longblob"));
+  return tmp;
+}
+
+const Name Type_handler_blob::name() const
+{
+  static Name tmp(STRING_WITH_LEN("blob"));
+  return tmp;
+}
+
+const Name Type_handler_enum::name() const
+{
+  static Name tmp(STRING_WITH_LEN("enum"));
+  return tmp;
+}
+
+const Name Type_handler_set::name() const
+{
+  static Name tmp(STRING_WITH_LEN("set"));
+  return tmp;
+}
+
+const Name Type_handler_bool::name() const
+{
+  static Name tmp(STRING_WITH_LEN("boolean"));
+  return tmp;
+}
+
+const Name Type_handler_tiny::name() const
+{
+  static Name tmp(STRING_WITH_LEN("tinyint"));
+  return tmp;
+}
+
+const Name Type_handler_short::name() const
+{
+  static Name tmp(STRING_WITH_LEN("smallint"));
+  return tmp;
+}
+
+const Name Type_handler_long::name() const
+{
+  static Name tmp(STRING_WITH_LEN("int"));
+  return tmp;
+}
+
+const Name Type_handler_longlong::name() const
+{
+  static Name tmp(STRING_WITH_LEN("bigint"));
+  return tmp;
+}
+
+const Name Type_handler_int24::name() const
+{
+  static Name tmp(STRING_WITH_LEN("mediumint"));
+  return tmp;
+}
+
+const Name Type_handler_year::name() const
+{
+  static Name tmp(STRING_WITH_LEN("year"));
+  return tmp;
+}
+
+const Name Type_handler_bit::name() const
+{
+  static Name tmp(STRING_WITH_LEN("bit"));
+  return tmp;
+}
+
+const Name Type_handler_float::name() const
+{
+  static Name tmp(STRING_WITH_LEN("float"));
+  return tmp;
+}
+
+const Name Type_handler_double::name() const
+{
+  static Name tmp(STRING_WITH_LEN("double"));
+  return tmp;
+}
+
+const Name Type_handler_olddecimal::name() const
+{
+  static Name tmp(STRING_WITH_LEN("decimal"));
+  return tmp;
+}
+
+const Name Type_handler_newdecimal::name() const
+{
+  static Name tmp(STRING_WITH_LEN("decimal"));
+  return tmp;
+}
+
+const Name Type_handler_time_common::name() const
+{
+  static Name tmp(STRING_WITH_LEN("time"));
+  return tmp;
+}
+
+const Name Type_handler_date_common::name() const
+{
+  static Name tmp(STRING_WITH_LEN("date"));
+  return tmp;
+}
+
+const Name Type_handler_datetime_common::name() const
+{
+  static Name tmp(STRING_WITH_LEN("datetime"));
+  return tmp;
+}
+
+const Name Type_handler_timestamp_common::name() const
+{
+  static Name tmp(STRING_WITH_LEN("timestamp"));
+  return tmp;
+}
 
 const Name Type_handler_utiny::name() const
 {
@@ -1464,10 +1604,23 @@ const Name Type_handler_ulonglong::name() const
 
 /***************************************************************************/
 
-const Name
-  Type_handler::m_version_default(STRING_WITH_LEN("")),
-  Type_handler::m_version_mariadb53(STRING_WITH_LEN("mariadb-5.3")),
-  Type_handler::m_version_mysql56(STRING_WITH_LEN("mysql-5.6"));
+const Name Type_handler::version() const
+{
+  static const Name ver(STRING_WITH_LEN(""));
+  return ver;
+}
+
+const Name Type_handler::version_mariadb53() const
+{
+  static const Name ver(STRING_WITH_LEN("mariadb-5.3"));
+  return ver;
+}
+
+const Name Type_handler::version_mysql56() const
+{
+  static const Name ver(STRING_WITH_LEN("mysql-5.6"));
+  return ver;
+}
 
 
 /***************************************************************************/
@@ -2771,15 +2924,6 @@ bool Type_handler_bit::
 
 /*************************************************************************/
 
-void Type_handler_blob_common::
-       Column_definition_reuse_fix_attributes(THD *thd,
-                                              Column_definition *def,
-                                              const Field *field) const
-{
-  DBUG_ASSERT(def->key_length == 0);
-}
-
-
 void Type_handler_typelib::
        Column_definition_reuse_fix_attributes(THD *thd,
                                               Column_definition *def,
@@ -3257,6 +3401,49 @@ uint32 Type_handler_enum::calc_pack_length(uint32 length) const
   return 0;
 }
 
+
+/*************************************************************************/
+uint Type_handler::calc_key_length(const Column_definition &def) const
+{
+  DBUG_ASSERT(def.pack_length == calc_pack_length((uint32) def.length));
+  return def.pack_length;
+}
+
+uint Type_handler_bit::calc_key_length(const Column_definition &def) const
+{
+  if (f_bit_as_char(def.pack_flag))
+    return def.pack_length;
+  /* We need one extra byte to store the bits we save among the null bits */
+  return def.pack_length + MY_TEST(def.length & 7);
+}
+
+uint Type_handler_newdecimal::calc_key_length(const Column_definition &def) const
+{
+  return def.pack_length;
+}
+
+uint
+Type_handler_string_result::calc_key_length(const Column_definition &def) const
+{
+  return (uint) def.length;
+}
+
+uint Type_handler_enum::calc_key_length(const Column_definition &def) const
+{
+  DBUG_ASSERT(def.interval);
+  return get_enum_pack_length(def.interval->count);
+}
+
+uint Type_handler_set::calc_key_length(const Column_definition &def) const
+{
+  DBUG_ASSERT(def.interval);
+  return get_set_pack_length(def.interval->count);
+}
+
+uint Type_handler_blob_common::calc_key_length(const Column_definition &def) const
+{
+  return 0;
+}
 
 /*************************************************************************/
 Field *Type_handler::make_and_init_table_field(MEM_ROOT *root,
@@ -6073,6 +6260,30 @@ bool Type_handler_temporal_result::
 }
 
 
+bool Type_handler_time_common::
+       Item_func_round_fix_length_and_dec(Item_func_round *item) const
+{
+  item->fix_arg_time();
+  return false;
+}
+
+
+bool Type_handler_datetime_common::
+       Item_func_round_fix_length_and_dec(Item_func_round *item) const
+{
+  item->fix_arg_datetime();
+  return false;
+}
+
+
+bool Type_handler_timestamp_common::
+       Item_func_round_fix_length_and_dec(Item_func_round *item) const
+{
+  item->fix_arg_datetime();
+  return false;
+}
+
+
 bool Type_handler_string_result::
        Item_func_round_fix_length_and_dec(Item_func_round *item) const
 {
@@ -7993,67 +8204,6 @@ bool Type_handler::
 }
 
 
-/***************************************************************************/
-
-bool Type_handler::Vers_history_point_resolve_unit(THD *thd,
-                                                   Vers_history_point *point)
-                                                   const
-{
-  /*
-    Disallow using non-relevant data types in history points.
-    Even expressions with explicit TRANSACTION or TIMESTAMP units.
-  */
-  point->bad_expression_data_type_error(name().ptr());
-  return true;
-}
-
-
-bool Type_handler_typelib::
-       Vers_history_point_resolve_unit(THD *thd,
-                                       Vers_history_point *point) const
-{
-  /*
-    ENUM/SET have dual type properties (string and numeric).
-    Require explicit CAST to avoid ambiguity.
-  */
-  point->bad_expression_data_type_error(name().ptr());
-  return true;
-}
-
-
-bool Type_handler_general_purpose_int::
-       Vers_history_point_resolve_unit(THD *thd,
-                                       Vers_history_point *point) const
-{
-  return point->resolve_unit_trx_id(thd);
-}
-
-
-bool Type_handler_bit::
-       Vers_history_point_resolve_unit(THD *thd,
-                                       Vers_history_point *point) const
-{
-  return point->resolve_unit_trx_id(thd);
-}
-
-
-bool Type_handler_temporal_result::
-       Vers_history_point_resolve_unit(THD *thd,
-                                       Vers_history_point *point) const
-{
-  return point->resolve_unit_timestamp(thd);
-}
-
-
-bool Type_handler_general_purpose_string::
-       Vers_history_point_resolve_unit(THD *thd,
-                                       Vers_history_point *point) const
-{
-  return point->resolve_unit_timestamp(thd);
-}
-
-/***************************************************************************/
-
 bool Type_handler_null::Item_const_eq(const Item_const *a,
                                       const Item_const *b,
                                       bool binary_cmp) const
@@ -8130,13 +8280,6 @@ Type_handler_temporal_result::Item_const_eq(const Item_const *a,
 
 const Type_handler *
 Type_handler_hex_hybrid::cast_to_int_type_handler() const
-{
-  return &type_handler_ulonglong;
-}
-
-
-const Type_handler *
-Type_handler_hex_hybrid::type_handler_for_system_time() const
 {
   return &type_handler_ulonglong;
 }

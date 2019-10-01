@@ -47,7 +47,6 @@
 #include <string>
 #include "log_event.h"
 #include <slave.h>
-#include "sql_plugin.h"                         /* wsrep_plugins_pre_init() */
 
 #include <sstream>
 
@@ -281,7 +280,7 @@ static void wsrep_log_cb(wsrep::log::level level, const char *msg)
       sql_print_warning("WSREP: %s", msg);
       break;
     case wsrep::log::error:
-    sql_print_error("WSREP: %s", msg);
+      sql_print_error("WSREP: %s", msg);
     break;
     case wsrep::log::debug:
       if (wsrep_debug) sql_print_information ("[Debug] WSREP: %s", msg);
@@ -1800,13 +1799,16 @@ static void wsrep_TOI_begin_failed(THD* thd, const wsrep_buf_t* /* const err */)
     if (wsrep_emulate_bin_log) wsrep_thd_binlog_trx_reset(thd);
     if (wsrep_write_dummy_event(thd, "TOI begin failed")) { goto fail; }
     wsrep::client_state& cs(thd->wsrep_cs());
-    int const ret= cs.leave_toi_local(wsrep::mutable_buffer());
+    std::string const err(wsrep::to_c_string(cs.current_error()));
+    wsrep::mutable_buffer err_buf;
+    err_buf.push_back(err);
+    int const ret= cs.leave_toi_local(err_buf);
     if (ret)
     {
       WSREP_ERROR("Leaving critical section for failed TOI failed: thd: %lld, "
                   "schema: %s, SQL: %s, rcode: %d wsrep_error: %s",
                   (long long)thd->real_id, thd->db.str,
-                  thd->query(), ret, wsrep::to_c_string(cs.current_error()));
+                  thd->query(), ret, err.c_str());
       goto fail;
     }
   }
@@ -1927,7 +1929,12 @@ static void wsrep_TOI_end(THD *thd) {
   if (wsrep_thd_is_local_toi(thd))
   {
     wsrep_set_SE_checkpoint(client_state.toi_meta().gtid());
-    int ret= client_state.leave_toi_local(wsrep::mutable_buffer());
+    wsrep::mutable_buffer err;
+    if (thd->is_error() && !wsrep_must_ignore_error(thd))
+    {
+        wsrep_store_error(thd, err);
+    }
+    int const ret= client_state.leave_toi_local(err);
     if (!ret)
     {
       WSREP_DEBUG("TO END: %lld", client_state.toi_meta().seqno().get());
@@ -2243,6 +2250,7 @@ static void wsrep_close_thread(THD *thd)
 {
   thd->set_killed(KILL_CONNECTION);
   MYSQL_CALLBACK(thread_scheduler, post_kill_notification, (thd));
+  mysql_mutex_lock(&thd->LOCK_thd_kill);
   if (thd->mysys_var)
   {
     thd->mysys_var->abort=1;
@@ -2255,6 +2263,7 @@ static void wsrep_close_thread(THD *thd)
     }
     mysql_mutex_unlock(&thd->mysys_var->mutex);
   }
+  mysql_mutex_unlock(&thd->LOCK_thd_kill);
 }
 
 static my_bool have_committing_connections(THD *thd, void *)
@@ -2418,7 +2427,7 @@ int wsrep_must_ignore_error(THD* thd)
   const uint flags= sql_command_flags[thd->lex->sql_command];
 
   DBUG_ASSERT(error);
-  DBUG_ASSERT(wsrep_thd_is_toi(thd) || wsrep_thd_is_applying(thd));
+  DBUG_ASSERT(wsrep_thd_is_toi(thd));
 
   if ((wsrep_ignore_apply_errors & WSREP_IGNORE_ERRORS_ON_DDL))
     goto ignore_error;
@@ -2651,7 +2660,8 @@ void* start_wsrep_THD(void *arg)
   /* now that we've called my_thread_init(), it is safe to call DBUG_* */
 
   thd->thread_stack= (char*) &thd;
-  if (thd->store_globals())
+  wsrep_assign_from_threadvars(thd);
+  if (wsrep_store_threadvars(thd))
   {
     close_connection(thd, ER_OUT_OF_RESOURCES);
     statistic_increment(aborted_connects,&LOCK_status);
@@ -2689,18 +2699,16 @@ void* start_wsrep_THD(void *arg)
 
   WSREP_DEBUG("wsrep system thread %llu, %p starting",
               thd->thread_id, thd);
-  thd_args->fun()(thd, thd_args->args());
+  thd_args->fun()(thd, static_cast<void *>(thd_args));
 
   WSREP_DEBUG("wsrep system thread: %llu, %p closing",
               thd->thread_id, thd);
 
   /* Wsrep may reset globals during thread context switches, store globals
      before cleanup. */
-  thd->store_globals();
+  wsrep_store_threadvars(thd);
 
   close_connection(thd, 0);
-
-  delete thd_args;
 
   mysql_mutex_lock(&LOCK_wsrep_slave_threads);
   DBUG_ASSERT(wsrep_running_threads > 0);
@@ -2720,6 +2728,7 @@ void* start_wsrep_THD(void *arg)
       break;
   }
 
+  delete thd_args;
   WSREP_DEBUG("wsrep running threads now: %lu", wsrep_running_threads);
   mysql_cond_broadcast(&COND_wsrep_slave_threads);
   mysql_mutex_unlock(&LOCK_wsrep_slave_threads);

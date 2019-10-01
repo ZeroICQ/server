@@ -2158,6 +2158,10 @@ int show_create_table(THD *thd, TABLE_LIST *table_list, String *packet,
         packet->append(STRING_WITH_LEN(" STORED"));
       else
         packet->append(STRING_WITH_LEN(" VIRTUAL"));
+      if (field->invisible == INVISIBLE_USER)
+      {
+        packet->append(STRING_WITH_LEN(" INVISIBLE"));
+      }
     }
     else
     {
@@ -2233,7 +2237,9 @@ int show_create_table(THD *thd, TABLE_LIST *table_list, String *packet,
 
   for (uint i=0 ; i < share->keys ; i++,key_info++)
   {
-    if (key_info->flags & HA_INVISIBLE_KEY)
+    Virtual_column_info *vcol_info = key_info->key_part->field->vcol_info;
+
+    if (key_info->flags & HA_INVISIBLE_KEY && !vcol_info)
       continue;
     KEY_PART_INFO *key_part= key_info->key_part;
     bool found_primary=0;
@@ -2478,6 +2484,7 @@ static const LEX_CSTRING *view_algorithm(TABLE_LIST *table)
     return &merge;
   default:
     DBUG_ASSERT(0); // never should happen
+    /* fall through */
   case VIEW_ALGORITHM_UNDEFINED:
     return &undefined;
   }

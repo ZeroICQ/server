@@ -340,7 +340,6 @@ PSI_statement_info stmt_info_rpl;
 
 /* the default log output is log tables */
 static bool lower_case_table_names_used= 0;
-static bool max_long_data_size_used= false;
 static bool volatile select_thread_in_use, signal_thread_in_use;
 static my_bool opt_debugging= 0, opt_external_locking= 0, opt_console= 0;
 static my_bool opt_short_log_format= 0, opt_silent_startup= 0;
@@ -450,6 +449,7 @@ my_bool opt_noacl;
 my_bool sp_automatic_privileges= 1;
 
 ulong opt_binlog_rows_event_max_size;
+ulong binlog_row_metadata;
 my_bool opt_master_verify_checksum= 0;
 my_bool opt_slave_sql_verify_checksum= 1;
 const char *binlog_format_names[]= {"MIXED", "STATEMENT", "ROW", NullS};
@@ -510,12 +510,6 @@ my_decimal decimal_zero;
 long opt_secure_timestamp;
 uint default_password_lifetime;
 my_bool disconnect_on_expired_password;
-
-/*
-  Maximum length of parameter value which can be set through
-  mysql_send_long_data() call.
-*/
-ulong max_long_data_size;
 
 bool max_user_connections_checking=0;
 /**
@@ -1590,7 +1584,7 @@ static my_bool kill_thread_phase_2(THD *thd, void *)
 /* associated with the kill thread phase 1 */
 static my_bool warn_threads_active_after_phase_1(THD *thd, void *)
 {
-  if (!thd->is_binlog_dump_thread())
+  if (!thd->is_binlog_dump_thread() && thd->vio_ok())
     sql_print_warning("%s: Thread %llu (user : '%s') did not exit\n", my_progname,
                       (ulonglong) thd->thread_id,
                       (thd->main_security_ctx.user ?
@@ -1877,6 +1871,7 @@ extern "C" void unireg_abort(int exit_code)
 
 #ifdef WITH_WSREP
   if (WSREP_ON &&
+      Wsrep_server_state::is_inited() &&
       Wsrep_server_state::instance().state() != wsrep::server_state::s_disconnected)
   {
     /*
@@ -4943,6 +4938,7 @@ static int init_server_components()
 
 #ifdef WITH_WSREP
   if (wsrep_init_server()) unireg_abort(1);
+
   if (WSREP_ON && !wsrep_recovery && !opt_abort)
   {
     if (opt_bootstrap) // bootsrap option given - disable wsrep functionality
@@ -6493,6 +6489,10 @@ struct my_option my_long_options[]=
    0, GET_INT, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
 #endif /* HAVE_REPLICATION */
 #ifndef DBUG_OFF
+  {"debug-assert", 0,
+   "Allow DBUG_ASSERT() to invoke assert()",
+   &my_assert, &my_assert,
+   0, GET_BOOL, OPT_ARG, 1, 0, 0, 0, 0, 0},
   {"debug-assert-on-error", 0,
    "Do an assert in various functions if we get a fatal error",
    &my_assert_on_error, &my_assert_on_error,
@@ -8138,14 +8138,13 @@ mysqld_get_one_option(int optid, const struct my_option *opt, char *argument)
       return 1;
 #endif
 
-    SYSVAR_AUTOSIZE(pidfile_name_ptr, pidfile_name);
-    /* PID file */
-    strmake(pidfile_name, argument, sizeof(pidfile_name)-5);
-    strmov(fn_ext(pidfile_name),".pid");
-
-    /* check for errors */
-    if (!pidfile_name_ptr)
-      return 1;                                 // out of memory error
+    if (IS_SYSVAR_AUTOSIZE(&pidfile_name_ptr))
+    {
+      SYSVAR_AUTOSIZE(pidfile_name_ptr, pidfile_name);
+      /* PID file */
+      strmake(pidfile_name, argument, sizeof(pidfile_name)-5);
+      strmov(fn_ext(pidfile_name),".pid");
+    }
     break;
   }
 #ifdef HAVE_REPLICATION
@@ -8328,9 +8327,6 @@ mysqld_get_one_option(int optid, const struct my_option *opt, char *argument)
     /* fall through */
   case OPT_PLUGIN_LOAD_ADD:
     opt_plugin_load_list_ptr->push_back(new i_string(argument));
-    break;
-  case OPT_MAX_LONG_DATA_SIZE:
-    max_long_data_size_used= true;
     break;
   case OPT_PFS_INSTRUMENT:
   {
@@ -8746,14 +8742,6 @@ static int get_options(int *argc_ptr, char ***argv_ptr)
 #endif
 
   opt_readonly= read_only;
-
-  /*
-    If max_long_data_size is not specified explicitly use
-    value of max_allowed_packet.
-  */
-  if (!max_long_data_size_used)
-    SYSVAR_AUTOSIZE(max_long_data_size,
-                    global_system_variables.max_allowed_packet);
 
   /* Remember if max_user_connections was 0 at startup */
   max_user_connections_checking= global_system_variables.max_user_connections != 0;

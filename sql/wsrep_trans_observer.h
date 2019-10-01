@@ -292,9 +292,7 @@ static inline int wsrep_before_commit(THD* thd, bool all)
 
   Return zero on succes, non-zero on failure.
  */
-static inline int wsrep_ordered_commit(THD* thd,
-                                      bool all,
-                                      const wsrep_apply_error&)
+static inline int wsrep_ordered_commit(THD* thd, bool all)
 {
   DBUG_ENTER("wsrep_ordered_commit");
   WSREP_DEBUG("wsrep_ordered_commit: %d", wsrep_is_real(thd, all));
@@ -420,6 +418,17 @@ static inline void wsrep_close(THD* thd)
   if (thd->wsrep_cs().state() != wsrep::client_state::s_none)
   {
     thd->wsrep_cs().close();
+  }
+  DBUG_VOID_RETURN;
+}
+
+static inline void
+wsrep_wait_rollback_complete_and_acquire_ownership(THD *thd)
+{
+  DBUG_ENTER("wsrep_wait_rollback_complete_and_acquire_ownership");
+  if (thd->wsrep_cs().state() != wsrep::client_state::s_none)
+  {
+    thd->wsrep_cs().wait_rollback_complete_and_acquire_ownership();
   }
   DBUG_VOID_RETURN;
 }

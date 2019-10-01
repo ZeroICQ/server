@@ -121,6 +121,7 @@ public:
   }
   Item *transform(THD *thd, Item_transformer transformer, uchar *arg);
   bool eval_not_null_tables(void *opt_arg);
+  bool find_not_null_fields(table_map allowed);
 
   uint cols() const { return arg_count; }
   Item* element_index(uint i) { return args[i]; }
@@ -153,7 +154,7 @@ public:
   bool check_vcol_func_processor(void *arg) {return FALSE; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_row>(thd, this); }
-  Item *build_clone(THD *thd);
+  Item *build_clone(THD *thd, const Build_clone_prm &prm);
 };
 
 #endif /* ITEM_ROW_INCLUDED */

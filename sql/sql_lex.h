@@ -207,6 +207,14 @@ enum sub_select_type
   GLOBAL_OPTIONS_TYPE, DERIVED_TABLE_TYPE, OLAP_TYPE
 };
 
+enum set_op_type
+{
+  UNSPECIFIED,
+  UNION_DISTINCT, UNION_ALL,
+  EXCEPT_DISTINCT, EXCEPT_ALL,
+  INTERSECT_DISTINCT, INTERSECT_ALL
+};
+
 inline int cmp_unit_op(enum sub_select_type op1, enum sub_select_type op2)
 {
   DBUG_ASSERT(op1 >= UNION_TYPE && op1 <= EXCEPT_TYPE);
@@ -841,8 +849,8 @@ public:
   // Ensures that at least all members used during cleanup() are initialized.
   st_select_lex_unit()
     : union_result(NULL), table(NULL), result(NULL),
-      cleaned(false),
-      fake_select_lex(NULL)
+      cleaned(false), bag_set_op_optimized(false),
+      have_except_all_or_intersect_all(false), fake_select_lex(NULL)
   {
   }
 
@@ -853,9 +861,11 @@ public:
     optimized, // optimize phase already performed for UNION (unit)
     optimized_2,
     executed, // already executed
-    cleaned;
+    cleaned,
+    bag_set_op_optimized;
 
   bool optimize_started;
+  bool have_except_all_or_intersect_all;
 
   // list of fields which points to temporary table for union
   List<Item> item_list;
@@ -867,11 +877,6 @@ public:
     any SELECT of this unit execution
   */
   List<Item> types;
-  /**
-    There is INTERSECT and it is item used in creating temporary
-    table for it
-  */
-  Item_int *intersect_mark;
   /**
      TRUE if the unit contained TVC at the top level that has been wrapped
      into SELECT:
@@ -928,8 +933,9 @@ public:
     fake_select_lex is used.
   */
   st_select_lex *saved_fake_select_lex;
-
-  st_select_lex *union_distinct; /* pointer to the last UNION DISTINCT */
+  
+  /* pointer to the last node before last subsequence of UNION ALL */
+  st_select_lex *union_distinct;
   bool describe; /* union exec() called for EXPLAIN */
   Procedure *last_procedure;     /* Pointer to procedure, if such exists */
 
@@ -955,6 +961,7 @@ public:
   bool prepare(TABLE_LIST *derived_arg, select_result *sel_result,
                ulong additional_options);
   bool optimize();
+  void optimize_bag_operation(bool is_outer_distinct);
   bool exec();
   bool exec_recursive();
   bool cleanup();
@@ -1025,7 +1032,7 @@ Field_pair *find_matching_field_pair(Item *item, List<Field_pair> pair_list);
 #define TOUCHED_SEL_COND 1/* WHERE/HAVING/ON should be reinited before use */
 #define TOUCHED_SEL_DERIVED (1<<1)/* derived should be reinited before use */
 
-
+#define UNIT_NEST_FL        1
 /*
   SELECT_LEX - store information of parsed SELECT statment
 */
@@ -1048,7 +1055,7 @@ public:
     select1->first_nested points to select1.
   */
   st_select_lex *first_nested;
-
+  uint8 nest_flags; 
   Name_resolution_context context;
   LEX_CSTRING db;
   Item *where, *having;                         /* WHERE & HAVING clauses */
@@ -1524,6 +1531,13 @@ public:
 
   select_handler *find_select_handler(THD *thd);
 
+  bool is_set_op()
+  {
+    return linkage == UNION_TYPE || 
+           linkage == EXCEPT_TYPE || 
+           linkage == INTERSECT_TYPE;
+  }
+
 private:
   bool m_non_agg_field_used;
   bool m_agg_func_used;
@@ -1570,6 +1584,8 @@ public:
   void add_statistics(SELECT_LEX_UNIT *unit);
   bool make_unique_derived_name(THD *thd, LEX_CSTRING *alias);
   void lex_start(LEX *plex);
+  bool is_unit_nest() { return (nest_flags & UNIT_NEST_FL); }
+  void mark_as_unit_nest() { nest_flags= UNIT_NEST_FL; }
 };
 typedef class st_select_lex SELECT_LEX;
 
@@ -3267,10 +3283,10 @@ public:
   /*
     Usually `expr` rule of yacc is quite reused but some commands better
     not support subqueries which comes standard with this rule, like
-    KILL, HA_READ, CREATE/ALTER EVENT etc. Set this to `false` to get
-    syntax error back.
+    KILL, HA_READ, CREATE/ALTER EVENT etc. Set this to a non-NULL
+    clause name to get an error.
   */
-  bool expr_allows_subselect;
+  const char *clause_that_disallows_subselect;
   bool selects_allow_into;
   bool selects_allow_procedure;
   /*
@@ -3990,9 +4006,7 @@ public:
                           const Lex_ident_cli_st *var_name,
                           const Lex_ident_cli_st *field_name);
 
-  Item *create_item_query_expression(THD *thd,
-                                     const char *tok_start,
-                                     st_select_lex_unit *unit);
+  Item *create_item_query_expression(THD *thd, st_select_lex_unit *unit);
 
   Item *make_item_func_replace(THD *thd, Item *org, Item *find, Item *replace);
   Item *make_item_func_substr(THD *thd, Item *a, Item *b, Item *c);
@@ -4421,9 +4435,6 @@ public:
     insert_list= 0;
   }
 
-  bool make_select_in_brackets(SELECT_LEX* dummy_select,
-                               SELECT_LEX *nselect, bool automatic);
-
   SELECT_LEX_UNIT *alloc_unit();
   SELECT_LEX *alloc_select(bool is_select);
   SELECT_LEX_UNIT *create_unit(SELECT_LEX*);
@@ -4439,7 +4450,7 @@ public:
   bool insert_select_hack(SELECT_LEX *sel);
   SELECT_LEX *create_priority_nest(SELECT_LEX *first_in_nest);
 
-  void set_main_unit(st_select_lex_unit *u)
+  bool set_main_unit(st_select_lex_unit *u)
   {
     unit.options= u->options;
     unit.uncacheable= u->uncacheable;
@@ -4449,16 +4460,10 @@ public:
     unit.union_distinct= u->union_distinct;
     unit.set_with_clause(u->with_clause);
     builtin_select.exclude_from_global();
+    return false;
   }
   bool check_main_unit_semantics();
 
-  // reaction on different parsed parts (bodies are in sql_yacc.yy)
-  bool parsed_unit_in_brackets(SELECT_LEX_UNIT *unit);
-  SELECT_LEX *parsed_select(SELECT_LEX *sel, Lex_order_limit_lock * l);
-  SELECT_LEX *parsed_unit_in_brackets_tail(SELECT_LEX_UNIT *unit,
-                                           Lex_order_limit_lock * l);
-  SELECT_LEX *parsed_select_in_brackets(SELECT_LEX *sel,
-                                             Lex_order_limit_lock * l);
   SELECT_LEX_UNIT *parsed_select_expr_start(SELECT_LEX *s1, SELECT_LEX *s2,
                                             enum sub_select_type unit_type,
                                             bool distinct);
@@ -4466,20 +4471,35 @@ public:
                                            SELECT_LEX *s2,
                                            enum sub_select_type unit_type,
                                            bool distinct, bool oracle);
-  SELECT_LEX_UNIT *parsed_body_select(SELECT_LEX *sel,
-                                      Lex_order_limit_lock * l);
-  bool parsed_body_unit(SELECT_LEX_UNIT *unit);
-  SELECT_LEX_UNIT *parsed_body_unit_tail(SELECT_LEX_UNIT *unit,
-                                         Lex_order_limit_lock * l);
-  SELECT_LEX *parsed_subselect(SELECT_LEX_UNIT *unit, char *place);
+  bool parsed_multi_operand_query_expression_body(SELECT_LEX_UNIT *unit);
+  SELECT_LEX_UNIT *add_tail_to_query_expression_body(SELECT_LEX_UNIT *unit,
+						     Lex_order_limit_lock *l);
+  SELECT_LEX_UNIT *
+  add_tail_to_query_expression_body_ext_parens(SELECT_LEX_UNIT *unit,
+					       Lex_order_limit_lock *l);
+  SELECT_LEX_UNIT *parsed_body_ext_parens_primary(SELECT_LEX_UNIT *unit,
+                                                  SELECT_LEX *primary,
+                                              enum sub_select_type unit_type,
+                                              bool distinct);
+  SELECT_LEX_UNIT *
+  add_primary_to_query_expression_body(SELECT_LEX_UNIT *unit,
+                                       SELECT_LEX *sel,
+                                       enum sub_select_type unit_type,
+                                       bool distinct,
+                                       bool oracle);
+  SELECT_LEX_UNIT *
+  add_primary_to_query_expression_body_ext_parens(
+                                       SELECT_LEX_UNIT *unit,
+                                       SELECT_LEX *sel,
+                                       enum sub_select_type unit_type,
+                                       bool distinct);
+  SELECT_LEX *parsed_subselect(SELECT_LEX_UNIT *unit);
   bool parsed_insert_select(SELECT_LEX *firs_select);
   bool parsed_TVC_start();
   SELECT_LEX *parsed_TVC_end();
-  TABLE_LIST *parsed_derived_select(SELECT_LEX *sel, int for_system_time,
-                                    LEX_CSTRING *alias);
-  TABLE_LIST *parsed_derived_unit(SELECT_LEX_UNIT *unit,
-                                  int for_system_time,
-                                  LEX_CSTRING *alias);
+  TABLE_LIST *parsed_derived_table(SELECT_LEX_UNIT *unit,
+                                   int for_system_time,
+                                   LEX_CSTRING *alias);
   bool parsed_create_view(SELECT_LEX_UNIT *unit, int check);
   bool select_finalize(st_select_lex_unit *expr);
   bool select_finalize(st_select_lex_unit *expr, Lex_select_lock l);
